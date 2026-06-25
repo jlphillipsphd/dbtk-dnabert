@@ -76,10 +76,6 @@ class DnaBert(DbtkModel):
             padding_idx=self.tokenizer.vocab["[PAD]"]
         )
 
-    @property
-    def all_tied_weights_keys(self):
-        return {}
-
     def forward(
         self,
         kmers: torch.Tensor
