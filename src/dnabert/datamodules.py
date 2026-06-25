@@ -1,5 +1,4 @@
 from dbtk.data.datasets import SequenceDataset, SequenceTaxonomyDataset
-from dbtk.data.vocabularies import Vocabulary
 from dbtk.data import transforms
 from dbtk.data.transforms.compositions import DnaSequenceTransform
 from dnadb import fasta, taxonomy
@@ -7,7 +6,9 @@ import lightning as L
 from pathlib import Path
 import torch
 import torch.nn.functional as F
-from typing import Callable, Optional, Union
+from typing import Optional, Union
+
+from .tokenizers import DnaTokenizer
 
 from .tokenizers import DnaTokenizer
 
@@ -101,8 +102,7 @@ class DnaBertPretrainingDataModule(L.LightningDataModule):
 class DnaBertTaxonomyDataModule(L.LightningDataModule):
     def __init__(
         self,
-        vocabulary: Vocabulary,
-        tokenizer: Callable,
+        tokenizer: DnaTokenizer,
         train_sequences_path: Union[str, Path],
         train_taxonomies_path: Union[str, Path],
         test_sequences_path: Optional[Union[str, Path]] = None,
@@ -110,14 +110,10 @@ class DnaBertTaxonomyDataModule(L.LightningDataModule):
         val_split: float = 0.0,
         min_length: int = 65,
         max_length: int = 250,
-        kmer: int = 1,
-        kmer_stride: int = 1,
-        mask_ratio: float = 0.15,
         batch_size: int = 32,
         num_workers: int = 0
     ):
         super().__init__()
-        self.vocabulary = vocabulary
         self.tokenizer = tokenizer
         self.train_sequences_path = train_sequences_path
         self.train_taxonomies_path = train_taxonomies_path
@@ -126,31 +122,23 @@ class DnaBertTaxonomyDataModule(L.LightningDataModule):
         self.val_split = val_split
         self.min_length = min_length
         self.max_length = max_length
-        self.kmer = kmer
-        self.kmer_stride = kmer_stride
-        self.mask_ratio = mask_ratio
         self.batch_size = batch_size
         self.num_workers = num_workers
 
     def _sequence_transform(self, fasta_entry: fasta.FastaEntry):
-        # Sequence
         sequence = fasta_entry.sequence
-
-        # Randomly trim the sequence such that the resulting kmer-sequence length
-        # is within the minimum/maximum sequence length range.
-        min_length = min(self.min_length*self.kmer_stride - 1 + self.kmer, len(sequence))
-        max_length= min(self.max_length*self.kmer_stride - 1 + self.kmer, len(sequence))
-        length = torch.randint(min_length, max_length, size=(1,)).item()
-        offset = torch.randint(0, len(sequence) - length + 1, size=(1,)).item()
-        sequence = torch.tensor(list(self.vocabulary(self.tokenizer(sequence[offset:offset+length]))))
-
-        # Padding
-        sequence = F.pad(sequence, (0, self.max_length - len(sequence)), value=self.vocabulary["[PAD]"])
-
-        return sequence
+        n = len(sequence)
+        kmer, stride = self.tokenizer.kmer, self.tokenizer.kmer_stride
+        min_bp = min(self.min_length * stride - stride + kmer, n)
+        max_bp = min(self.max_length * stride - stride + kmer, n)
+        length = torch.randint(min_bp, max_bp + 1, (1,)).item()
+        offset = torch.randint(0, n - length + 1, (1,)).item()
+        tokens = torch.tensor(self.tokenizer(sequence[offset:offset+length]))
+        tokens = F.pad(tokens, (0, self.max_length - len(tokens)), value=self.tokenizer.vocab["[PAD]"])
+        return tokens
 
     def _taxonomy_transform(self, taxonomy_entry: taxonomy.TaxonomyDbEntry):
-        return torch.tensor(taxonomy_entry.taxonomy.taxonomy_ids)
+        return torch.tensor(taxonomy_entry.taxonomy.taxon_ids)
 
     def _collate(self, batch):
         sequences, taxonomies = zip(*batch)
