@@ -1,0 +1,13 @@
+datamodule:
+  class_path: dnabert.datamodules.DnaBertTaxonomyDataModule
+  config:
+    tokenizer: ${model.base.tokenizer}
+    train_sequences_path: ${env:DATASETS_DIR}/silva_nr99_filtered_515f_806r/sequences.fasta.db
+    train_taxonomies_path: ${env:DATASETS_DIR}/silva_nr99_filtered_515f_806r/taxonomy.tsv.db
+    test_sequences_path: ${env:DATASETS_DIR}/silva_filtered_515f_806r/sequences.fasta.db
+    test_taxonomies_path: ${env:DATASETS_DIR}/silva_filtered_515f_806r/taxonomy.tsv.db
+    val_split: 0.1
+    min_length: 65
+    max_length: 250
+    batch_size: 256
+    num_workers: 0

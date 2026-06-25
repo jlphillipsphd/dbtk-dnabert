@@ -1,0 +1,5 @@
+model:
+  class_path: dnabert.models.DnaBertForNaiveTaxonomy
+  config:
+    base: ${env:MODELS_DIR}/dnabert-64d-250bp-1mer-silva138.2
+    taxonomy_db_path: ${env:DATASETS_DIR}/silva_nr99_filtered_515f_806r/taxonomy.tsv.db
