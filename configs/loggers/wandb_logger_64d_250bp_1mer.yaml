@@ -1,0 +1,7 @@
+train:
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    config:
+      project: setbert-reproduction
+      name: dnabert_64d_250bp_1mer_silva138.2
+      save_dir: ./logs
