@@ -233,6 +233,7 @@ class DnaBertForTaxonomy(DbtkModel):
             base_class: Optional[BaseModelClassType["DnaBert"]] = "dnabert.models.DnaBert",
             rank_labels: Optional[List[List[str]]] = None,
             parent_indices: Optional[List[List[int]]] = None,
+            taxonomy_db_path: Optional[str] = None,
             **kwargs
         ):
             super().__init__(**kwargs)
@@ -240,6 +241,7 @@ class DnaBertForTaxonomy(DbtkModel):
             self.base_class = base_class
             self.rank_labels = rank_labels or []
             self.parent_indices = parent_indices or []
+            self.taxonomy_db_path = taxonomy_db_path
 
     config_class = Config
     base_model_prefix = "base"
@@ -248,6 +250,8 @@ class DnaBertForTaxonomy(DbtkModel):
 
     def __init__(self, config: Optional[Union[Config, dict]] = None):
         super().__init__(config)
+        if not self.config.rank_labels and self.config.taxonomy_db_path:
+            self._load_taxonomy_from_db()
         self.taxonomy_head = TopDownTaxonomyHead(
             self.base.config.embed_dim,
             self.config.rank_labels,
@@ -295,6 +299,17 @@ class DnaBertForTaxonomy(DbtkModel):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-4)
 
+    def _load_taxonomy_from_db(self):
+        from dnadb import taxonomy as tax_module
+        with tax_module.TaxonomyDb(self.config.taxonomy_db_path) as tax_db:
+            tree = tax_db.tree
+        for rank, taxons in enumerate(tree.taxonomy_id_map):
+            self.config.rank_labels.append([t.taxon_label for t in taxons])
+            if rank == 0:
+                self.config.parent_indices.append([])
+            else:
+                self.config.parent_indices.append([t.parent.taxon_id for t in taxons])
+
     @classmethod
     def from_taxonomy_db(
         cls,
@@ -302,26 +317,7 @@ class DnaBertForTaxonomy(DbtkModel):
         base: Optional[Union["DnaBert", BaseModelType["DnaBert"]]] = None,
         **config_kwargs
     ) -> "DnaBertForTaxonomy":
-        from dnadb import taxonomy as tax_module
-        with tax_module.TaxonomyDb(taxonomy_db_path) as tax_db:
-            tree = tax_db.tree
-
-        rank_labels = []
-        parent_indices = []
-        for rank, taxons in enumerate(tree.taxonomy_id_map):
-            rank_labels.append([t.taxon_label for t in taxons])
-            if rank == 0:
-                parent_indices.append([])
-            else:
-                parent_indices.append([t.parent.taxon_id for t in taxons])
-
-        config = cls.Config(
-            base=base,
-            rank_labels=rank_labels,
-            parent_indices=parent_indices,
-            **config_kwargs
-        )
-        return cls(config)
+        return cls(cls.Config(base=base, taxonomy_db_path=str(taxonomy_db_path), **config_kwargs))
 
 
 @export
@@ -399,6 +395,7 @@ class DnaBertForNaiveTaxonomy(DbtkModel):
             base_class: Optional[BaseModelClassType["DnaBert"]] = "dnabert.models.DnaBert",
             rank_labels: Optional[List[List[str]]] = None,
             parent_indices: Optional[List[List[int]]] = None,
+            taxonomy_db_path: Optional[str] = None,
             **kwargs
         ):
             super().__init__(**kwargs)
@@ -406,6 +403,7 @@ class DnaBertForNaiveTaxonomy(DbtkModel):
             self.base_class = base_class
             self.rank_labels = rank_labels or []
             self.parent_indices = parent_indices or []
+            self.taxonomy_db_path = taxonomy_db_path
 
     config_class = Config
     base_model_prefix = "base"
@@ -414,6 +412,8 @@ class DnaBertForNaiveTaxonomy(DbtkModel):
 
     def __init__(self, config: Optional[Union[Config, dict]] = None):
         super().__init__(config)
+        if not self.config.rank_labels and self.config.taxonomy_db_path:
+            self._load_taxonomy_from_db()
         self.taxonomy_head = NaiveTaxonomyHead(
             self.base.config.embed_dim,
             self.config.rank_labels,
@@ -457,6 +457,17 @@ class DnaBertForNaiveTaxonomy(DbtkModel):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-4)
 
+    def _load_taxonomy_from_db(self):
+        from dnadb import taxonomy as tax_module
+        with tax_module.TaxonomyDb(self.config.taxonomy_db_path) as tax_db:
+            tree = tax_db.tree
+        for rank, taxons in enumerate(tree.taxonomy_id_map):
+            self.config.rank_labels.append([t.taxon_label for t in taxons])
+            if rank == 0:
+                self.config.parent_indices.append([])
+            else:
+                self.config.parent_indices.append([t.parent.taxon_id for t in taxons])
+
     @classmethod
     def from_taxonomy_db(
         cls,
@@ -464,24 +475,7 @@ class DnaBertForNaiveTaxonomy(DbtkModel):
         base: Optional[Union["DnaBert", BaseModelType["DnaBert"]]] = None,
         **config_kwargs
     ) -> "DnaBertForNaiveTaxonomy":
-        from dnadb import taxonomy as tax_module
-        with tax_module.TaxonomyDb(taxonomy_db_path) as tax_db:
-            tree = tax_db.tree
-        rank_labels = []
-        parent_indices = []
-        for rank, taxons in enumerate(tree.taxonomy_id_map):
-            rank_labels.append([t.taxon_label for t in taxons])
-            if rank == 0:
-                parent_indices.append([])
-            else:
-                parent_indices.append([t.parent.taxon_id for t in taxons])
-        config = cls.Config(
-            base=base,
-            rank_labels=rank_labels,
-            parent_indices=parent_indices,
-            **config_kwargs
-        )
-        return cls(config)
+        return cls(cls.Config(base=base, taxonomy_db_path=str(taxonomy_db_path), **config_kwargs))
 
 
 @export
@@ -496,6 +490,7 @@ class DnaBertForBertaxTaxonomy(DbtkModel):
             base_class: Optional[BaseModelClassType["DnaBert"]] = "dnabert.models.DnaBert",
             rank_labels: Optional[List[List[str]]] = None,
             parent_indices: Optional[List[List[int]]] = None,
+            taxonomy_db_path: Optional[str] = None,
             **kwargs
         ):
             super().__init__(**kwargs)
@@ -503,6 +498,7 @@ class DnaBertForBertaxTaxonomy(DbtkModel):
             self.base_class = base_class
             self.rank_labels = rank_labels or []
             self.parent_indices = parent_indices or []
+            self.taxonomy_db_path = taxonomy_db_path
 
     config_class = Config
     base_model_prefix = "base"
@@ -511,6 +507,8 @@ class DnaBertForBertaxTaxonomy(DbtkModel):
 
     def __init__(self, config: Optional[Union[Config, dict]] = None):
         super().__init__(config)
+        if not self.config.rank_labels and self.config.taxonomy_db_path:
+            self._load_taxonomy_from_db()
         self.taxonomy_head = BertaxTaxonomyHead(
             self.base.config.embed_dim,
             self.config.rank_labels,
@@ -554,6 +552,17 @@ class DnaBertForBertaxTaxonomy(DbtkModel):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-4)
 
+    def _load_taxonomy_from_db(self):
+        from dnadb import taxonomy as tax_module
+        with tax_module.TaxonomyDb(self.config.taxonomy_db_path) as tax_db:
+            tree = tax_db.tree
+        for rank, taxons in enumerate(tree.taxonomy_id_map):
+            self.config.rank_labels.append([t.taxon_label for t in taxons])
+            if rank == 0:
+                self.config.parent_indices.append([])
+            else:
+                self.config.parent_indices.append([t.parent.taxon_id for t in taxons])
+
     @classmethod
     def from_taxonomy_db(
         cls,
@@ -561,24 +570,7 @@ class DnaBertForBertaxTaxonomy(DbtkModel):
         base: Optional[Union["DnaBert", BaseModelType["DnaBert"]]] = None,
         **config_kwargs
     ) -> "DnaBertForBertaxTaxonomy":
-        from dnadb import taxonomy as tax_module
-        with tax_module.TaxonomyDb(taxonomy_db_path) as tax_db:
-            tree = tax_db.tree
-        rank_labels = []
-        parent_indices = []
-        for rank, taxons in enumerate(tree.taxonomy_id_map):
-            rank_labels.append([t.taxon_label for t in taxons])
-            if rank == 0:
-                parent_indices.append([])
-            else:
-                parent_indices.append([t.parent.taxon_id for t in taxons])
-        config = cls.Config(
-            base=base,
-            rank_labels=rank_labels,
-            parent_indices=parent_indices,
-            **config_kwargs
-        )
-        return cls(config)
+        return cls(cls.Config(base=base, taxonomy_db_path=str(taxonomy_db_path), **config_kwargs))
 
 
 @export
