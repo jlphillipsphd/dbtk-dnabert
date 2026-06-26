@@ -1,0 +1,22 @@
+classifier:
+  class_path: dnabert.classifiers.DnaBertTopDownClassifier
+  config:
+    model_path: ${env:MODELS_DIR}/dnabert-finetune-topdown-64d-250bp-1mer-silva138.2
+    batch_size: 256
+
+reference_dataset:
+  name: silva_nr99_filtered_515f_806r
+  path: ${env:DATASETS_DIR}/silva_nr99_filtered_515f_806r
+
+datasets:
+  - name: mini-qiita-108759
+    path: ${env:DATASETS_DIR}/mini-qiita-108759
+  - name: mini-qiita-147774
+    path: ${env:DATASETS_DIR}/mini-qiita-147774
+  - name: mini-qiita-163012
+    path: ${env:DATASETS_DIR}/mini-qiita-163012
+  - name: mini-qiita-177266
+    path: ${env:DATASETS_DIR}/mini-qiita-177266
+
+seed: 42
+overwrite: false
