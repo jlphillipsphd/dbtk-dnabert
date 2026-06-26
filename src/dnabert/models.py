@@ -12,6 +12,17 @@ from typing import Dict, List, Optional, Union
 
 from .tokenizers import DnaTokenizer
 
+
+def _topk_padded(logits: torch.Tensor, k: int) -> torch.Tensor:
+    """Top-k indices padded to length k when a rank has fewer than k classes."""
+    k_actual = min(k, logits.shape[-1])
+    indices = logits.topk(k_actual, dim=-1).indices  # [B, k_actual]
+    if k_actual < k:
+        pad = indices[:, -1:].expand(-1, k - k_actual)
+        indices = torch.cat([indices, pad], dim=-1)
+    return indices  # [B, k]
+
+
 @export
 class DnaBert(DbtkModel):
     class Config(PretrainedConfig):
@@ -299,6 +310,14 @@ class DnaBertForTaxonomy(DbtkModel):
     def test_step(self, batch):
         return self._step("test", batch)
 
+    def predict_step(self, batch, batch_idx):
+        top_k = getattr(self, '_predict_top_k', 5)
+        seq_ids, tokens, true_ids = batch  # true_ids: [B, R]
+        logits_list = self(tokens)
+        pred_ids = torch.stack([l.argmax(-1) for l in logits_list], dim=1)  # [B, R]
+        topk_ids = torch.stack([_topk_padded(l, top_k) for l in logits_list], dim=1)  # [B, R, k]
+        return seq_ids, pred_ids.cpu(), true_ids.cpu(), topk_ids.cpu()
+
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-4)
 
@@ -457,6 +476,26 @@ class DnaBertForNaiveTaxonomy(DbtkModel):
     def test_step(self, batch):
         return self._step("test", batch)
 
+    def predict_step(self, batch, batch_idx):
+        top_k = getattr(self, '_predict_top_k', 5)
+        seq_ids, tokens, true_ids = batch  # true_ids: [B, R]
+        logits = self(tokens)              # [B, num_leaf_taxa]
+        pred_leaf = logits.argmax(-1)      # [B]
+        k = min(top_k, logits.shape[-1])
+        top_k_leaves = logits.topk(k, dim=-1).indices  # [B, k]
+        pred_ids = torch.stack([           # [B, R]
+            self.taxonomy_head.ancestor_at_rank(pred_leaf, r)
+            for r in range(self.num_ranks)
+        ], dim=1)
+        topk_ids = torch.stack([           # [B, R, k]
+            torch.stack([
+                self.taxonomy_head.ancestor_at_rank(top_k_leaves[:, j], r)
+                for j in range(k)
+            ], dim=1)
+            for r in range(self.num_ranks)
+        ], dim=1)
+        return seq_ids, pred_ids.cpu(), true_ids.cpu(), topk_ids.cpu()
+
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-4)
 
@@ -551,6 +590,14 @@ class DnaBertForBertaxTaxonomy(DbtkModel):
 
     def test_step(self, batch):
         return self._step("test", batch)
+
+    def predict_step(self, batch, batch_idx):
+        top_k = getattr(self, '_predict_top_k', 5)
+        seq_ids, tokens, true_ids = batch  # true_ids: [B, R]
+        logits_list = self(tokens)
+        pred_ids = torch.stack([l.argmax(-1) for l in logits_list], dim=1)  # [B, R]
+        topk_ids = torch.stack([_topk_padded(l, top_k) for l in logits_list], dim=1)  # [B, R, k]
+        return seq_ids, pred_ids.cpu(), true_ids.cpu(), topk_ids.cpu()
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-4)
