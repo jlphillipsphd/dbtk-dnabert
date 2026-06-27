@@ -321,6 +321,19 @@ class DnaBertForTaxonomy(DbtkModel):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-4)
 
+    def setup(self, stage: str):
+        if not self.config.rank_labels:
+            return
+        num_genera = len(self.config.rank_labels[-1])
+        datamodule = getattr(self.trainer, 'datamodule', None)
+        datamodule_num_taxa = getattr(datamodule, 'num_taxa', None)
+        if datamodule_num_taxa is not None and datamodule_num_taxa != num_genera:
+            raise ValueError(
+                f"Mapping database has {datamodule_num_taxa} genera but model "
+                f"taxonomy has {num_genera} — ensure both were generated from the "
+                "same reference taxonomy database"
+            )
+
     def to_embedding_model(self) -> "DnaBertForEmbedding":
         """Return a DnaBertForEmbedding carrying this model's encoder weights."""
         return DnaBertForEmbedding(DnaBertForEmbedding.Config(base=self.base))
@@ -503,6 +516,19 @@ class DnaBertForNaiveTaxonomy(DbtkModel):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-4)
 
+    def setup(self, stage: str):
+        if not self.config.rank_labels:
+            return
+        num_genera = len(self.config.rank_labels[-1])
+        datamodule = getattr(self.trainer, 'datamodule', None)
+        datamodule_num_taxa = getattr(datamodule, 'num_taxa', None)
+        if datamodule_num_taxa is not None and datamodule_num_taxa != num_genera:
+            raise ValueError(
+                f"Mapping database has {datamodule_num_taxa} genera but model "
+                f"taxonomy has {num_genera} — ensure both were generated from the "
+                "same reference taxonomy database"
+            )
+
     def to_embedding_model(self) -> "DnaBertForEmbedding":
         """Return a DnaBertForEmbedding carrying this model's encoder weights."""
         return DnaBertForEmbedding(DnaBertForEmbedding.Config(base=self.base))
@@ -609,6 +635,19 @@ class DnaBertForBertaxTaxonomy(DbtkModel):
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-4)
+
+    def setup(self, stage: str):
+        if not self.config.rank_labels:
+            return
+        num_genera = len(self.config.rank_labels[-1])
+        datamodule = getattr(self.trainer, 'datamodule', None)
+        datamodule_num_taxa = getattr(datamodule, 'num_taxa', None)
+        if datamodule_num_taxa is not None and datamodule_num_taxa != num_genera:
+            raise ValueError(
+                f"Mapping database has {datamodule_num_taxa} genera but model "
+                f"taxonomy has {num_genera} — ensure both were generated from the "
+                "same reference taxonomy database"
+            )
 
     def to_embedding_model(self) -> "DnaBertForEmbedding":
         """Return a DnaBertForEmbedding carrying this model's encoder weights."""

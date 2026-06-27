@@ -122,6 +122,8 @@ class DnaBertTaxonomyDataModule(L.LightningDataModule):
         self.max_length = max_length
         self.batch_size = batch_size
         self.num_workers = num_workers
+        with taxonomy.TaxonomyDb(train_taxonomies_path) as db:
+            self.num_taxa: int = db.num_labels
 
     def _sequence_transform(self, fasta_entry: fasta.FastaEntry):
         sequence = fasta_entry.sequence
