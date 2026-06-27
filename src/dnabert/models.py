@@ -321,6 +321,10 @@ class DnaBertForTaxonomy(DbtkModel):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-4)
 
+    def to_embedding_model(self) -> "DnaBertForEmbedding":
+        """Return a DnaBertForEmbedding carrying this model's encoder weights."""
+        return DnaBertForEmbedding(DnaBertForEmbedding.Config(base=self.base))
+
     def _load_taxonomy_from_db(self):
         from dnadb import taxonomy as tax_module
         with tax_module.TaxonomyDb(self.config.taxonomy_db_path) as tax_db:
@@ -499,6 +503,10 @@ class DnaBertForNaiveTaxonomy(DbtkModel):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-4)
 
+    def to_embedding_model(self) -> "DnaBertForEmbedding":
+        """Return a DnaBertForEmbedding carrying this model's encoder weights."""
+        return DnaBertForEmbedding(DnaBertForEmbedding.Config(base=self.base))
+
     def _load_taxonomy_from_db(self):
         from dnadb import taxonomy as tax_module
         with tax_module.TaxonomyDb(self.config.taxonomy_db_path) as tax_db:
@@ -601,6 +609,10 @@ class DnaBertForBertaxTaxonomy(DbtkModel):
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-4)
+
+    def to_embedding_model(self) -> "DnaBertForEmbedding":
+        """Return a DnaBertForEmbedding carrying this model's encoder weights."""
+        return DnaBertForEmbedding(DnaBertForEmbedding.Config(base=self.base))
 
     def _load_taxonomy_from_db(self):
         from dnadb import taxonomy as tax_module
