@@ -190,6 +190,10 @@ class DnaBertForPretraining(DbtkModel):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
         return optimizer
 
+    def to_embedding_model(self) -> "DnaBertForEmbedding":
+        """Return a DnaBertForEmbedding carrying this model's encoder weights."""
+        return DnaBertForEmbedding(DnaBertForEmbedding.Config(base=self.base))
+
     @property
     def tokenizer(self):
         return self.base.tokenizer
