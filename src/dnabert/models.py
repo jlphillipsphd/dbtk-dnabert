@@ -212,7 +212,7 @@ def _load_taxonomy_from_lmdb(path: Path) -> Tuple[List[List[str]], List[List[int
         if rank == 0:
             parent_indices.append([])
         else:
-            parent_indices.append([t.parent.taxon_id for t in taxons])
+            parent_indices.append([t.parent.taxonomy_id for t in taxons])
     return rank_labels, parent_indices
 
 
