@@ -1,8 +1,9 @@
 classifier:
-  class_path: dnabert.classifiers.DnaBertTopDownClassifier
+  class_path: dnabert.classifiers.DnaBertClassifier
   config:
     model_path: ${env:MODELS_DIR}/dnabert-finetune-topdown-64d-250bp-1mer-silva138.2
     batch_size: 256
+    head_type: topdown
 
 reference_dataset:
   name: silva_nr99_filtered_515f_806r

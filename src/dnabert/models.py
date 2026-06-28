@@ -8,7 +8,7 @@ from transformers import PretrainedConfig
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from .tokenizers import DnaTokenizer
 
@@ -197,8 +197,68 @@ class DnaBertForPretraining(DbtkModel):
     def save_pretrained(self, *args, **kwargs):
         return self.base.save_pretrained(*args, **kwargs)
 
+def _load_taxonomy_from_lmdb(path: Path) -> Tuple[List[List[str]], List[List[int]]]:
+    from dnadb import taxonomy as tax_module
+    rank_labels: List[List[str]] = []
+    parent_indices: List[List[int]] = []
+    with tax_module.TaxonomyDb(str(path)) as tax_db:
+        tree = tax_db.tree
+    for rank, taxons in enumerate(tree.taxonomy_id_map):
+        rank_labels.append([t.taxon_label for t in taxons])
+        if rank == 0:
+            parent_indices.append([])
+        else:
+            parent_indices.append([t.parent.taxon_id for t in taxons])
+    return rank_labels, parent_indices
+
+
+def _load_taxonomy_from_greengenes(path: Path) -> Tuple[List[List[str]], List[List[int]]]:
+    from dnadb import taxonomy as tax_module
+    all_labels = sorted(set(e.label for e in tax_module.entries(str(path))))
+    parsed = [label.split("; ") for label in all_labels]
+    num_ranks = len(parsed[0])
+
+    prefix_to_idx: List[Dict[str, int]] = [dict() for _ in range(num_ranks)]
+    for parts in parsed:
+        for rank in range(num_ranks):
+            prefix = "; ".join(parts[:rank + 1])
+            if prefix not in prefix_to_idx[rank]:
+                prefix_to_idx[rank][prefix] = len(prefix_to_idx[rank])
+
+    rank_labels: List[List[str]] = []
+    parent_indices: List[List[int]] = []
+    for rank in range(num_ranks):
+        by_idx = sorted(prefix_to_idx[rank].items(), key=lambda kv: kv[1])
+        rank_labels.append([label for label, _ in by_idx])
+        if rank == 0:
+            parent_indices.append([])
+        else:
+            pindices = []
+            for label, _ in by_idx:
+                parent_prefix = "; ".join(label.split("; ")[:-1])
+                pindices.append(prefix_to_idx[rank - 1][parent_prefix])
+            parent_indices.append(pindices)
+
+    return rank_labels, parent_indices
+
+
 @export
-class TopDownTaxonomyHead(nn.Module):
+def load_taxonomy(path: Union[str, Path]) -> Tuple[List[List[str]], List[List[int]]]:
+    """Load rank_labels and parent_indices from a taxonomy file.
+
+    .txt → Greengenes flat-file format; otherwise → LMDB TaxonomyDb.
+    Returns (rank_labels, parent_indices).
+    """
+    path = Path(path)
+    if path.suffix == ".txt":
+        return _load_taxonomy_from_greengenes(path)
+    return _load_taxonomy_from_lmdb(path)
+
+
+@export
+class TaxonomyHead(nn.Module):
+    """Base class for per-rank taxonomy prediction heads."""
+
     def __init__(
         self,
         embed_dim: int,
@@ -206,7 +266,24 @@ class TopDownTaxonomyHead(nn.Module):
         parent_indices: List[List[int]]
     ):
         super().__init__()
+        if not rank_labels:
+            raise ValueError("rank_labels must be non-empty")
         self.rank_labels = rank_labels
+
+    @property
+    def num_ranks(self) -> int:
+        return len(self.rank_labels)
+
+
+@export
+class TopDownTaxonomyHead(TaxonomyHead):
+    def __init__(
+        self,
+        embed_dim: int,
+        rank_labels: List[List[str]],
+        parent_indices: List[List[int]]
+    ):
+        super().__init__(embed_dim, rank_labels, parent_indices)
         self.projections = nn.ModuleList([
             nn.Linear(embed_dim, len(labels))
             for labels in rank_labels
@@ -217,10 +294,6 @@ class TopDownTaxonomyHead(nn.Module):
                     f"parent_idx_{rank}",
                     torch.tensor(indices, dtype=torch.long)
                 )
-
-    @property
-    def num_ranks(self) -> int:
-        return len(self.projections)
 
     def forward(self, embedding: torch.Tensor) -> List[torch.Tensor]:
         logits_list = []
@@ -248,6 +321,7 @@ class DnaBertForTaxonomy(DbtkModel):
             rank_labels: Optional[List[List[str]]] = None,
             parent_indices: Optional[List[List[int]]] = None,
             taxonomy_db_path: Optional[str] = None,
+            head_type: str = "topdown",
             **kwargs
         ):
             super().__init__(**kwargs)
@@ -256,6 +330,7 @@ class DnaBertForTaxonomy(DbtkModel):
             self.rank_labels = rank_labels or []
             self.parent_indices = parent_indices or []
             self.taxonomy_db_path = taxonomy_db_path
+            self.head_type = head_type
 
     config_class = Config
     base_model_prefix = "base"
@@ -265,8 +340,19 @@ class DnaBertForTaxonomy(DbtkModel):
     def __init__(self, config: Optional[Union[Config, dict]] = None):
         super().__init__(config)
         if not self.config.rank_labels and self.config.taxonomy_db_path:
-            self._load_taxonomy_from_db()
-        self.taxonomy_head = TopDownTaxonomyHead(
+            rank_labels, parent_indices = load_taxonomy(self.config.taxonomy_db_path)
+            self.config.rank_labels = rank_labels
+            self.config.parent_indices = parent_indices
+        head_types = {
+            "topdown": TopDownTaxonomyHead,
+            "naive": NaiveTaxonomyHead,
+            "bertax": BertaxTaxonomyHead,
+        }
+        if self.config.head_type not in head_types:
+            raise ValueError(
+                f"Unknown head_type '{self.config.head_type}'. Choose from: {list(head_types)}"
+            )
+        self.taxonomy_head = head_types[self.config.head_type](
             self.base.config.embed_dim,
             self.config.rank_labels,
             self.config.parent_indices
@@ -280,25 +366,28 @@ class DnaBertForTaxonomy(DbtkModel):
     def tokenizer(self):
         return self.base.tokenizer
 
-    def forward(self, kmers: torch.Tensor) -> List[torch.Tensor]:
+    def forward(self, kmers: torch.Tensor):
         return self.taxonomy_head(self.base(kmers)["class"])
 
     def _step(self, mode: str, batch):
         sequences, taxonomies = batch  # taxonomies: [num_ranks, batch_size]
-        logits_list = self(sequences)
-
-        loss = sum(
-            F.cross_entropy(logits, taxonomies[rank])
-            for rank, logits in enumerate(logits_list)
-        )
-
-        self.log(f"{mode}/loss", loss, prog_bar=True, on_step=True, on_epoch=True)
-
-        with torch.no_grad():
-            for rank, logits in enumerate(logits_list):
-                acc = (logits.argmax(dim=-1) == taxonomies[rank]).float().mean()
-                self.log(f"{mode}/rank{rank}_acc", acc, prog_bar=False, on_step=False, on_epoch=True)
-
+        output = self(sequences)
+        if isinstance(output, list):
+            loss = sum(F.cross_entropy(logits, taxonomies[rank]) for rank, logits in enumerate(output))
+            self.log(f"{mode}/loss", loss, prog_bar=True, on_step=True, on_epoch=True)
+            with torch.no_grad():
+                for rank, logits in enumerate(output):
+                    acc = (logits.argmax(dim=-1) == taxonomies[rank]).float().mean()
+                    self.log(f"{mode}/rank{rank}_acc", acc, prog_bar=False, on_step=False, on_epoch=True)
+        else:
+            loss = F.cross_entropy(output, taxonomies[-1])
+            self.log(f"{mode}/loss", loss, prog_bar=True, on_step=True, on_epoch=True)
+            with torch.no_grad():
+                predicted_leaves = output.argmax(dim=-1)
+                for rank in range(self.num_ranks):
+                    pred_at_rank = self.taxonomy_head.ancestor_at_rank(predicted_leaves, rank)
+                    acc = (pred_at_rank == taxonomies[rank]).float().mean()
+                    self.log(f"{mode}/rank{rank}_acc", acc, prog_bar=False, on_step=False, on_epoch=True)
         return loss
 
     def training_step(self, batch):
@@ -312,10 +401,26 @@ class DnaBertForTaxonomy(DbtkModel):
 
     def predict_step(self, batch, batch_idx):
         top_k = getattr(self, '_predict_top_k', 5)
-        seq_ids, tokens, true_ids = batch  # true_ids: [B, R]
-        logits_list = self(tokens)
-        pred_ids = torch.stack([l.argmax(-1) for l in logits_list], dim=1)  # [B, R]
-        topk_ids = torch.stack([_topk_padded(l, top_k) for l in logits_list], dim=1)  # [B, R, k]
+        seq_ids, tokens, true_ids = batch
+        output = self(tokens)
+        if isinstance(output, list):
+            pred_ids = torch.stack([l.argmax(-1) for l in output], dim=1)  # [B, R]
+            topk_ids = torch.stack([_topk_padded(l, top_k) for l in output], dim=1)  # [B, R, k]
+        else:
+            pred_leaf = output.argmax(-1)  # [B]
+            k = min(top_k, output.shape[-1])
+            top_k_leaves = output.topk(k, dim=-1).indices  # [B, k]
+            pred_ids = torch.stack([
+                self.taxonomy_head.ancestor_at_rank(pred_leaf, r)
+                for r in range(self.num_ranks)
+            ], dim=1)  # [B, R]
+            topk_ids = torch.stack([
+                torch.stack([
+                    self.taxonomy_head.ancestor_at_rank(top_k_leaves[:, j], r)
+                    for j in range(k)
+                ], dim=1)
+                for r in range(self.num_ranks)
+            ], dim=1)  # [B, R, k]
         return seq_ids, pred_ids.cpu(), true_ids.cpu(), topk_ids.cpu()
 
     def configure_optimizers(self):
@@ -337,17 +442,6 @@ class DnaBertForTaxonomy(DbtkModel):
     def to_embedding_model(self) -> "DnaBertForEmbedding":
         """Return a DnaBertForEmbedding carrying this model's encoder weights."""
         return DnaBertForEmbedding(DnaBertForEmbedding.Config(base=self.base))
-
-    def _load_taxonomy_from_db(self):
-        from dnadb import taxonomy as tax_module
-        with tax_module.TaxonomyDb(self.config.taxonomy_db_path) as tax_db:
-            tree = tax_db.tree
-        for rank, taxons in enumerate(tree.taxonomy_id_map):
-            self.config.rank_labels.append([t.taxon_label for t in taxons])
-            if rank == 0:
-                self.config.parent_indices.append([])
-            else:
-                self.config.parent_indices.append([t.parent.taxon_id for t in taxons])
 
     @classmethod
     def from_taxonomy_db(
@@ -360,15 +454,14 @@ class DnaBertForTaxonomy(DbtkModel):
 
 
 @export
-class NaiveTaxonomyHead(nn.Module):
+class NaiveTaxonomyHead(TaxonomyHead):
     def __init__(
         self,
         embed_dim: int,
         rank_labels: List[List[str]],
         parent_indices: List[List[int]]
     ):
-        super().__init__()
-        self.rank_labels = rank_labels
+        super().__init__(embed_dim, rank_labels, parent_indices)
         num_leaf_taxa = len(rank_labels[-1])
         self.projection = nn.Linear(embed_dim, num_leaf_taxa)
 
@@ -380,10 +473,6 @@ class NaiveTaxonomyHead(nn.Module):
             ancestors = [parent_indices[rank + 1][a] for a in ancestors]
             self.register_buffer(f"leaf_ancestors_{rank}", torch.tensor(ancestors, dtype=torch.long))
 
-    @property
-    def num_ranks(self) -> int:
-        return len(self.rank_labels)
-
     def forward(self, embedding: torch.Tensor) -> torch.Tensor:
         return self.projection(embedding)
 
@@ -392,25 +481,20 @@ class NaiveTaxonomyHead(nn.Module):
 
 
 @export
-class BertaxTaxonomyHead(nn.Module):
+class BertaxTaxonomyHead(TaxonomyHead):
     def __init__(
         self,
         embed_dim: int,
         rank_labels: List[List[str]],
         parent_indices: List[List[int]]  # accepted for API consistency, unused
     ):
-        super().__init__()
-        self.rank_labels = rank_labels
+        super().__init__(embed_dim, rank_labels, parent_indices)
         taxon_counts = [len(labels) for labels in rank_labels]
         self.projections = nn.ModuleList()
         cumulative = 0
         for count in taxon_counts:
             self.projections.append(nn.Linear(embed_dim + cumulative, count))
             cumulative += count
-
-    @property
-    def num_ranks(self) -> int:
-        return len(self.projections)
 
     def forward(self, embedding: torch.Tensor) -> List[torch.Tensor]:
         logits_list = []
@@ -422,256 +506,6 @@ class BertaxTaxonomyHead(nn.Module):
         return logits_list
 
 
-@export
-class DnaBertForNaiveTaxonomy(DbtkModel):
-    class Config(PretrainedConfig):
-        is_composition = True
-        model_type = "dnabert_for_naive_taxonomy"
-
-        def __init__(
-            self,
-            base: Optional[BaseModelType["DnaBert"]] = None,
-            base_class: Optional[BaseModelClassType["DnaBert"]] = "dnabert.models.DnaBert",
-            rank_labels: Optional[List[List[str]]] = None,
-            parent_indices: Optional[List[List[int]]] = None,
-            taxonomy_db_path: Optional[str] = None,
-            **kwargs
-        ):
-            super().__init__(**kwargs)
-            self.base = base
-            self.base_class = base_class
-            self.rank_labels = rank_labels or []
-            self.parent_indices = parent_indices or []
-            self.taxonomy_db_path = taxonomy_db_path
-
-    config_class = Config
-    base_model_prefix = "base"
-    sub_models = ["base"]
-    base: "DnaBert"
-
-    def __init__(self, config: Optional[Union[Config, dict]] = None):
-        super().__init__(config)
-        if not self.config.rank_labels and self.config.taxonomy_db_path:
-            self._load_taxonomy_from_db()
-        self.taxonomy_head = NaiveTaxonomyHead(
-            self.base.config.embed_dim,
-            self.config.rank_labels,
-            self.config.parent_indices
-        )
-
-    @property
-    def num_ranks(self) -> int:
-        return self.taxonomy_head.num_ranks
-
-    @property
-    def tokenizer(self):
-        return self.base.tokenizer
-
-    def forward(self, kmers: torch.Tensor) -> torch.Tensor:
-        return self.taxonomy_head(self.base(kmers)["class"])
-
-    def _step(self, mode: str, batch):
-        sequences, taxonomies = batch  # taxonomies: [num_ranks, batch_size]
-        leaf_targets = taxonomies[-1]
-        logits = self(sequences)
-        loss = F.cross_entropy(logits, leaf_targets)
-        self.log(f"{mode}/loss", loss, prog_bar=True, on_step=True, on_epoch=True)
-        with torch.no_grad():
-            predicted_leaves = logits.argmax(dim=-1)
-            for rank in range(self.num_ranks):
-                pred_at_rank = self.taxonomy_head.ancestor_at_rank(predicted_leaves, rank)
-                acc = (pred_at_rank == taxonomies[rank]).float().mean()
-                self.log(f"{mode}/rank{rank}_acc", acc, prog_bar=False, on_step=False, on_epoch=True)
-        return loss
-
-    def training_step(self, batch):
-        return self._step("train", batch)
-
-    def validation_step(self, batch):
-        return self._step("val", batch)
-
-    def test_step(self, batch):
-        return self._step("test", batch)
-
-    def predict_step(self, batch, batch_idx):
-        top_k = getattr(self, '_predict_top_k', 5)
-        seq_ids, tokens, true_ids = batch  # true_ids: [B, R]
-        logits = self(tokens)              # [B, num_leaf_taxa]
-        pred_leaf = logits.argmax(-1)      # [B]
-        k = min(top_k, logits.shape[-1])
-        top_k_leaves = logits.topk(k, dim=-1).indices  # [B, k]
-        pred_ids = torch.stack([           # [B, R]
-            self.taxonomy_head.ancestor_at_rank(pred_leaf, r)
-            for r in range(self.num_ranks)
-        ], dim=1)
-        topk_ids = torch.stack([           # [B, R, k]
-            torch.stack([
-                self.taxonomy_head.ancestor_at_rank(top_k_leaves[:, j], r)
-                for j in range(k)
-            ], dim=1)
-            for r in range(self.num_ranks)
-        ], dim=1)
-        return seq_ids, pred_ids.cpu(), true_ids.cpu(), topk_ids.cpu()
-
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=1e-4)
-
-    def setup(self, stage: str):
-        if not self.config.rank_labels:
-            return
-        num_genera = len(self.config.rank_labels[-1])
-        datamodule = getattr(self.trainer, 'datamodule', None)
-        datamodule_num_taxa = getattr(datamodule, 'num_taxa', None)
-        if datamodule_num_taxa is not None and datamodule_num_taxa != num_genera:
-            raise ValueError(
-                f"Mapping database has {datamodule_num_taxa} genera but model "
-                f"taxonomy has {num_genera} — ensure both were generated from the "
-                "same reference taxonomy database"
-            )
-
-    def to_embedding_model(self) -> "DnaBertForEmbedding":
-        """Return a DnaBertForEmbedding carrying this model's encoder weights."""
-        return DnaBertForEmbedding(DnaBertForEmbedding.Config(base=self.base))
-
-    def _load_taxonomy_from_db(self):
-        from dnadb import taxonomy as tax_module
-        with tax_module.TaxonomyDb(self.config.taxonomy_db_path) as tax_db:
-            tree = tax_db.tree
-        for rank, taxons in enumerate(tree.taxonomy_id_map):
-            self.config.rank_labels.append([t.taxon_label for t in taxons])
-            if rank == 0:
-                self.config.parent_indices.append([])
-            else:
-                self.config.parent_indices.append([t.parent.taxon_id for t in taxons])
-
-    @classmethod
-    def from_taxonomy_db(
-        cls,
-        taxonomy_db_path: Union[str, Path],
-        base: Optional[Union["DnaBert", BaseModelType["DnaBert"]]] = None,
-        **config_kwargs
-    ) -> "DnaBertForNaiveTaxonomy":
-        return cls(cls.Config(base=base, taxonomy_db_path=str(taxonomy_db_path), **config_kwargs))
-
-
-@export
-class DnaBertForBertaxTaxonomy(DbtkModel):
-    class Config(PretrainedConfig):
-        is_composition = True
-        model_type = "dnabert_for_bertax_taxonomy"
-
-        def __init__(
-            self,
-            base: Optional[BaseModelType["DnaBert"]] = None,
-            base_class: Optional[BaseModelClassType["DnaBert"]] = "dnabert.models.DnaBert",
-            rank_labels: Optional[List[List[str]]] = None,
-            parent_indices: Optional[List[List[int]]] = None,
-            taxonomy_db_path: Optional[str] = None,
-            **kwargs
-        ):
-            super().__init__(**kwargs)
-            self.base = base
-            self.base_class = base_class
-            self.rank_labels = rank_labels or []
-            self.parent_indices = parent_indices or []
-            self.taxonomy_db_path = taxonomy_db_path
-
-    config_class = Config
-    base_model_prefix = "base"
-    sub_models = ["base"]
-    base: "DnaBert"
-
-    def __init__(self, config: Optional[Union[Config, dict]] = None):
-        super().__init__(config)
-        if not self.config.rank_labels and self.config.taxonomy_db_path:
-            self._load_taxonomy_from_db()
-        self.taxonomy_head = BertaxTaxonomyHead(
-            self.base.config.embed_dim,
-            self.config.rank_labels,
-            self.config.parent_indices
-        )
-
-    @property
-    def num_ranks(self) -> int:
-        return self.taxonomy_head.num_ranks
-
-    @property
-    def tokenizer(self):
-        return self.base.tokenizer
-
-    def forward(self, kmers: torch.Tensor) -> List[torch.Tensor]:
-        return self.taxonomy_head(self.base(kmers)["class"])
-
-    def _step(self, mode: str, batch):
-        sequences, taxonomies = batch  # taxonomies: [num_ranks, batch_size]
-        logits_list = self(sequences)
-        loss = sum(
-            F.cross_entropy(logits, taxonomies[rank])
-            for rank, logits in enumerate(logits_list)
-        )
-        self.log(f"{mode}/loss", loss, prog_bar=True, on_step=True, on_epoch=True)
-        with torch.no_grad():
-            for rank, logits in enumerate(logits_list):
-                acc = (logits.argmax(dim=-1) == taxonomies[rank]).float().mean()
-                self.log(f"{mode}/rank{rank}_acc", acc, prog_bar=False, on_step=False, on_epoch=True)
-        return loss
-
-    def training_step(self, batch):
-        return self._step("train", batch)
-
-    def validation_step(self, batch):
-        return self._step("val", batch)
-
-    def test_step(self, batch):
-        return self._step("test", batch)
-
-    def predict_step(self, batch, batch_idx):
-        top_k = getattr(self, '_predict_top_k', 5)
-        seq_ids, tokens, true_ids = batch  # true_ids: [B, R]
-        logits_list = self(tokens)
-        pred_ids = torch.stack([l.argmax(-1) for l in logits_list], dim=1)  # [B, R]
-        topk_ids = torch.stack([_topk_padded(l, top_k) for l in logits_list], dim=1)  # [B, R, k]
-        return seq_ids, pred_ids.cpu(), true_ids.cpu(), topk_ids.cpu()
-
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=1e-4)
-
-    def setup(self, stage: str):
-        if not self.config.rank_labels:
-            return
-        num_genera = len(self.config.rank_labels[-1])
-        datamodule = getattr(self.trainer, 'datamodule', None)
-        datamodule_num_taxa = getattr(datamodule, 'num_taxa', None)
-        if datamodule_num_taxa is not None and datamodule_num_taxa != num_genera:
-            raise ValueError(
-                f"Mapping database has {datamodule_num_taxa} genera but model "
-                f"taxonomy has {num_genera} — ensure both were generated from the "
-                "same reference taxonomy database"
-            )
-
-    def to_embedding_model(self) -> "DnaBertForEmbedding":
-        """Return a DnaBertForEmbedding carrying this model's encoder weights."""
-        return DnaBertForEmbedding(DnaBertForEmbedding.Config(base=self.base))
-
-    def _load_taxonomy_from_db(self):
-        from dnadb import taxonomy as tax_module
-        with tax_module.TaxonomyDb(self.config.taxonomy_db_path) as tax_db:
-            tree = tax_db.tree
-        for rank, taxons in enumerate(tree.taxonomy_id_map):
-            self.config.rank_labels.append([t.taxon_label for t in taxons])
-            if rank == 0:
-                self.config.parent_indices.append([])
-            else:
-                self.config.parent_indices.append([t.parent.taxon_id for t in taxons])
-
-    @classmethod
-    def from_taxonomy_db(
-        cls,
-        taxonomy_db_path: Union[str, Path],
-        base: Optional[Union["DnaBert", BaseModelType["DnaBert"]]] = None,
-        **config_kwargs
-    ) -> "DnaBertForBertaxTaxonomy":
-        return cls(cls.Config(base=base, taxonomy_db_path=str(taxonomy_db_path), **config_kwargs))
 
 
 @export

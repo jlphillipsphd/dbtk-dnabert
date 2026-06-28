@@ -2,9 +2,7 @@ import importlib.metadata
 from .models import *
 from .classifiers import (
     TaxonomyClassifier,
-    DnaBertTopDownClassifier,
-    DnaBertBertaxClassifier,
-    DnaBertNaiveClassifier,
+    DnaBertClassifier,
 )
 
 __version__ = importlib.metadata.version("dbtk-dnabert")
@@ -12,14 +10,12 @@ __version__ = importlib.metadata.version("dbtk-dnabert")
 __all__ = [
     "DnaBert",
     "DnaBertForPretraining",
+    "load_taxonomy",
+    "TaxonomyHead",
     "TopDownTaxonomyHead",
     "NaiveTaxonomyHead",
     "BertaxTaxonomyHead",
     "DnaBertForTaxonomy",
-    "DnaBertForNaiveTaxonomy",
-    "DnaBertForBertaxTaxonomy",
     "TaxonomyClassifier",
-    "DnaBertTopDownClassifier",
-    "DnaBertBertaxClassifier",
-    "DnaBertNaiveClassifier",
+    "DnaBertClassifier",
 ]
