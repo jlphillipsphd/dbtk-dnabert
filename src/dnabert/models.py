@@ -173,8 +173,8 @@ class DnaBertForPretraining(DbtkModel):
         output, targets = self(kmers)
         loss = F.cross_entropy(output, targets)
         accuracy = (output.argmax(dim=-1) == targets).float().mean()
-        self.log(f"{mode}/loss", loss, prog_bar=True, on_step=True, on_epoch=True)
-        self.log(f"{mode}/accuracy", accuracy, prog_bar=True, on_step=True, on_epoch=True)
+        self.log(f"{mode}/loss", loss, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
+        self.log(f"{mode}/accuracy", accuracy, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
         return loss
 
     def training_step(self, batch):
@@ -378,20 +378,20 @@ class DnaBertForTaxonomy(DbtkModel):
         output = self(sequences)
         if isinstance(output, list):
             loss = sum(F.cross_entropy(logits, taxonomies[rank]) for rank, logits in enumerate(output))
-            self.log(f"{mode}/loss", loss, prog_bar=True, on_step=True, on_epoch=True)
+            self.log(f"{mode}/loss", loss, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
             with torch.no_grad():
                 for rank, logits in enumerate(output):
                     acc = (logits.argmax(dim=-1) == taxonomies[rank]).float().mean()
-                    self.log(f"{mode}/rank{rank}_acc", acc, prog_bar=False, on_step=False, on_epoch=True)
+                    self.log(f"{mode}/rank{rank}_acc", acc, prog_bar=False, on_step=False, on_epoch=True, sync_dist=True)
         else:
             loss = F.cross_entropy(output, taxonomies[-1])
-            self.log(f"{mode}/loss", loss, prog_bar=True, on_step=True, on_epoch=True)
+            self.log(f"{mode}/loss", loss, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
             with torch.no_grad():
                 predicted_leaves = output.argmax(dim=-1)
                 for rank in range(self.num_ranks):
                     pred_at_rank = self.taxonomy_head.ancestor_at_rank(predicted_leaves, rank)
                     acc = (pred_at_rank == taxonomies[rank]).float().mean()
-                    self.log(f"{mode}/rank{rank}_acc", acc, prog_bar=False, on_step=False, on_epoch=True)
+                    self.log(f"{mode}/rank{rank}_acc", acc, prog_bar=False, on_step=False, on_epoch=True, sync_dist=True)
         return loss
 
     def training_step(self, batch):
