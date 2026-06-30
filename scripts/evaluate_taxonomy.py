@@ -24,9 +24,7 @@ from transformers import PretrainedConfig
 from dnabert.datamodules import DnaBertTaxonomyPredictDataModule
 
 MODEL_TYPE_MAP = {
-    "dnabert_for_taxonomy":        "dnabert.models.DnaBertForTaxonomy",
-    "dnabert_for_naive_taxonomy":  "dnabert.models.DnaBertForNaiveTaxonomy",
-    "dnabert_for_bertax_taxonomy": "dnabert.models.DnaBertForBertaxTaxonomy",
+    "dnabert_for_taxonomy": "dnabert.models.DnaBertForTaxonomy",
 }
 
 

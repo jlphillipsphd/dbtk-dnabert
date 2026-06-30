@@ -515,10 +515,9 @@ class BertaxTaxonomyHead(TaxonomyHead):
 @export
 class DnaBertForEmbedding(DbtkModel):
     class Config(PretrainedConfig):
-        # Enable nesting
         is_composition = True
+        model_type = "dnabert_for_embedding"
 
-        # Model configuration
         base: Optional[BaseModelType[DnaBert]] = None
         base_class: Optional[BaseModelClassType[DnaBert]] = "dnabert.models.DnaBert"
 
