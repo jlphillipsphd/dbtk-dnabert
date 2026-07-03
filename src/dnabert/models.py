@@ -208,7 +208,7 @@ def _load_taxonomy_from_lmdb(path: Path) -> Tuple[List[List[str]], List[List[int
     with tax_module.TaxonomyDb(str(path)) as tax_db:
         tree = tax_db.tree
     for rank, taxons in enumerate(tree.taxonomy_id_map):
-        rank_labels.append([t.taxon_label for t in taxons])
+        rank_labels.append([t.taxon_label.strip() for t in taxons])
         if rank == 0:
             parent_indices.append([])
         else:
