@@ -14,7 +14,7 @@
 #
 # Options:
 #   --silva-version VERSION   SILVA release version, e.g. 138.2  (required)
-#   --target TARGET           SSURef | SSURef_NR99 | both         (default: SSURef_NR99)
+#   --target TARGET           SSURef | SSURef_NR99 | both         (default: both)
 #   --amplicons               Extract 515f/806r amplicons         (default: on)
 #   --no-amplicons            Skip amplicon extraction
 #   --full-length             Also create full-length datasets     (default: off)
@@ -35,7 +35,7 @@ DATA_DIR="${DATA_DIR:-./data}"
 DATASETS_DIR="${DATASETS_DIR:-./datasets}"
 
 SILVA_VERSION=""
-TARGET="SSURef_NR99"
+TARGET="both"
 DO_AMPLICONS=true
 DO_FULL_LENGTH=false
 NUM_JOBS=1
