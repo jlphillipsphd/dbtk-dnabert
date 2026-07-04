@@ -404,6 +404,17 @@ class DnaBertForTaxonomy(DbtkModel):
         return self._step("test", batch)
 
     def predict_step(self, batch, batch_idx):
+        if len(batch) == 2:
+            # Genus-only prediction from DnaBertFastaPredictDataModule.
+            # Returns (sequence_indices [B], genus_pred_ids [B]).
+            seq_indices, tokens = batch
+            output = self(tokens)
+            if isinstance(output, list):
+                genus_pred = output[-1].argmax(-1)
+            else:
+                genus_pred = output.argmax(-1)
+            return seq_indices.cpu(), genus_pred.cpu()
+
         top_k = getattr(self, '_predict_top_k', 5)
         seq_ids, tokens, true_ids = batch
         output = self(tokens)

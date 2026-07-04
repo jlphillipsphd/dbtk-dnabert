@@ -1,10 +1,7 @@
 import importlib.metadata
 from transformers import AutoConfig
 from .models import *
-from .classifiers import (
-    TaxonomyClassifier,
-    DnaBertClassifier,
-)
+from .classifiers import DnaBertClassifier
 
 AutoConfig.register("dnabert", DnaBert.Config)
 AutoConfig.register("dnabert_for_pretraining", DnaBertForPretraining.Config)
@@ -23,6 +20,5 @@ __all__ = [
     "BertaxTaxonomyHead",
     "DnaBertForTaxonomy",
     "DnaBertForEmbedding",
-    "TaxonomyClassifier",
     "DnaBertClassifier",
 ]

@@ -266,3 +266,66 @@ class DnaBertTaxonomyPredictDataModule(L.LightningDataModule):
     def _collate(self, batch):
         seq_ids, tokens, taxon_ids = zip(*batch)
         return list(seq_ids), torch.stack(tokens), torch.stack(taxon_ids)
+
+
+class DnaBertFastaPredictDataset(torch.utils.data.Dataset):
+    """Dataset for genus prediction from a raw FastaDb — no taxonomy labels."""
+
+    def __init__(self, fasta_db: fasta.FastaDb, tokenizer: DnaTokenizer, max_length: int):
+        self.fasta_db = fasta_db
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+    def __len__(self):
+        return len(self.fasta_db)
+
+    def __getitem__(self, idx):
+        sequence = self.fasta_db.entry(idx).sequence
+        kmer, stride = self.tokenizer.kmer, self.tokenizer.kmer_stride
+        max_bp = self.max_length * stride - stride + kmer
+        tokens = torch.tensor(self.tokenizer(sequence[:max_bp]))
+        tokens = F.pad(tokens, (0, self.max_length - len(tokens)), value=self.tokenizer.vocab["[PAD]"])
+        return idx, tokens
+
+
+class DnaBertFastaPredictDataModule(L.LightningDataModule):
+    """Predict-only datamodule for genus prediction from a raw FastaDb.
+
+    Yields (sequence_index, tokens) batches. The model's embedded rank_labels
+    supply all taxonomy context — no taxonomy DB is needed.
+    """
+
+    def __init__(
+        self,
+        tokenizer: DnaTokenizer,
+        sequences_path: Union[str, Path],
+        max_length: int = 250,
+        batch_size: int = 256,
+        num_workers: int = 0,
+    ):
+        super().__init__()
+        self.tokenizer = tokenizer
+        self.sequences_path = Path(sequences_path)
+        self.max_length = max_length
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+
+    def setup(self, stage: str):
+        if stage == "predict":
+            self.dataset = DnaBertFastaPredictDataset(
+                fasta.FastaDb(self.sequences_path),
+                self.tokenizer,
+                self.max_length,
+            )
+
+    def teardown(self, stage: str):
+        if stage == "predict" and hasattr(self, "dataset"):
+            self.dataset.fasta_db.close()
+
+    def predict_dataloader(self):
+        return torch.utils.data.DataLoader(
+            self.dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+        )
