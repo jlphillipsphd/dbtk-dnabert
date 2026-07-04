@@ -3,8 +3,8 @@
 classifier:
   class_path: dnabert.classifiers.DnaBertClassifier
   config:
-    name: topdown-64d-250bp-1mer
-    model_path: ${env:MODELS_DIR}/dnabert-finetune-topdown-64d-250bp-1mer-silva138.2
+    name: topdown-768d-250bp-1mer
+    model_path: ${env:MODELS_DIR}/dnabert-finetune-topdown-768d-250bp-1mer-silva138.2
     batch_size: 256
 
 reference_dataset:
