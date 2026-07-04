@@ -13,14 +13,18 @@ from typing import Dict, List, Optional, Tuple, Union
 from .tokenizers import DnaTokenizer
 
 
-def _topk_padded(logits: torch.Tensor, k: int) -> torch.Tensor:
-    """Top-k indices padded to length k when a rank has fewer than k classes."""
+def _topk_padded(logits: torch.Tensor, k: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Top-k indices and scores, padded to length k when a rank has fewer than k classes."""
     k_actual = min(k, logits.shape[-1])
-    indices = logits.topk(k_actual, dim=-1).indices  # [B, k_actual]
+    result = logits.topk(k_actual, dim=-1)
+    indices = result.indices  # [B, k_actual]
+    values  = result.values   # [B, k_actual]
     if k_actual < k:
-        pad = indices[:, -1:].expand(-1, k - k_actual)
-        indices = torch.cat([indices, pad], dim=-1)
-    return indices  # [B, k]
+        pad_idx = indices[:, -1:].expand(-1, k - k_actual)
+        pad_val = torch.full((indices.shape[0], k - k_actual), float('-inf'), device=logits.device)
+        indices = torch.cat([indices, pad_idx], dim=-1)
+        values  = torch.cat([values,  pad_val],  dim=-1)
+    return indices, values  # [B, k], [B, k]
 
 
 @export
@@ -420,11 +424,15 @@ class DnaBertForTaxonomy(DbtkModel):
         output = self(tokens)
         if isinstance(output, list):
             pred_ids = torch.stack([l.argmax(-1) for l in output], dim=1)  # [B, R]
-            topk_ids = torch.stack([_topk_padded(l, top_k) for l in output], dim=1)  # [B, R, k]
+            topk_results = [_topk_padded(l, top_k) for l in output]
+            topk_ids    = torch.stack([r[0] for r in topk_results], dim=1)  # [B, R, k]
+            topk_scores = torch.stack([r[1] for r in topk_results], dim=1)  # [B, R, k]
         else:
             pred_leaf = output.argmax(-1)  # [B]
             k = min(top_k, output.shape[-1])
-            top_k_leaves = output.topk(k, dim=-1).indices  # [B, k]
+            leaf_topk = output.topk(k, dim=-1)
+            top_k_leaves  = leaf_topk.indices  # [B, k]
+            top_k_values  = leaf_topk.values   # [B, k]
             pred_ids = torch.stack([
                 self.taxonomy_head.ancestor_at_rank(pred_leaf, r)
                 for r in range(self.num_ranks)
@@ -436,7 +444,9 @@ class DnaBertForTaxonomy(DbtkModel):
                 ], dim=1)
                 for r in range(self.num_ranks)
             ], dim=1)  # [B, R, k]
-        return seq_ids, pred_ids.cpu(), true_ids.cpu(), topk_ids.cpu()
+            # Broadcast leaf scores across ranks (each ancestor's score = its leaf's score)
+            topk_scores = top_k_values.unsqueeze(1).expand(-1, self.num_ranks, -1)  # [B, R, k]
+        return seq_ids, pred_ids.cpu(), true_ids.cpu(), topk_ids.cpu(), topk_scores.cpu()
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-4)
