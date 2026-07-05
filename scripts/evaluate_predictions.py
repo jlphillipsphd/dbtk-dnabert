@@ -1,72 +1,35 @@
 #!/usr/bin/env python3
 """
-Evaluate a fine-tuned DnaBert taxonomy classification model.
+Evaluate cached taxonomy predictions produced by predict_taxonomy.py.
 
-Accuracy is computed by comparing taxonomy label strings. The model's embedded
-rank_labels (stored in taxonomy_id / DFS order) are sorted alphabetically to
-recover taxon_id order, which matches the integer IDs produced by the model.
-Ground-truth IDs from the evaluation taxonomy DB are resolved via
-tree.id_to_taxon_map (also alphabetically ordered). String comparison then
-works correctly even when the eval taxonomy DB has a broader label space than
-the training taxonomy (e.g. full SILVA 138.2 vs NR99).
+Computes top-1 and top-k accuracy per rank from a .pt predictions file and a
+taxonomy DB (the ground-truth source).  No model is needed at evaluation time.
 
-Anchor mode (--anchor-rank K):
-    Rank K is trusted. All coarser ranks (< K) are resolved by walking up
-    the taxonomy tree from the rank-K prediction rather than using independent
-    model predictions. Ranks finer than K (> K) remain independent.
-    When a taxon appears under multiple parents (shared name), the parent with
-    the highest model score at that rank is selected; if no candidate appears
-    in the top-k, the alphabetically first candidate is used as a tiebreak.
-    --anchor-rank 0 is equivalent to independent mode (no coarser ranks exist).
+Supports anchor-rank mode: rank K is trusted; coarser ranks are resolved by
+walking up the stored taxonomy tree rather than using independent predictions.
+The --top-k flag may be set to any value <= the K stored in the predictions file,
+allowing cheaper re-evaluation (e.g. top-1 through top-3 from a top-5 file).
 
 Usage:
-    python evaluate_taxonomy.py MODEL_PATH SEQUENCES_DB TAXONOMIES_DB [options]
+    python evaluate_predictions.py PREDICTIONS_FILE TAXONOMIES_DB [options]
 
 Example:
-    python evaluate_taxonomy.py $MODELS_DIR/dnabert-topdown-exported \\
-        $DATASETS_DIR/silva_nr99_filtered_515f_806r/sequences.test.fasta.db \\
+    python evaluate_predictions.py predictions.pt \\
         $DATASETS_DIR/silva_nr99_filtered_515f_806r/taxonomy.test.tax.db \\
-        --output results.tsv --anchor-rank 5
+        --anchor-rank 5
+    python evaluate_predictions.py predictions.pt taxonomy.test.tax.db \\
+        --top-k 1 --output results.tsv
 """
 
 import argparse
-import importlib
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from rich.progress import track
 
-import lightning as L
 import torch
 from dnadb import taxonomy
-from transformers import PretrainedConfig
-
-from dnabert.datamodules import DnaBertTaxonomyPredictDataModule
-
-MODEL_TYPE_MAP = {
-    "dnabert_for_taxonomy": "dnabert.models.DnaBertForTaxonomy",
-}
-
-
-def load_model(model_path: Path):
-    model_path = Path(model_path).resolve()
-    if not model_path.is_dir():
-        raise FileNotFoundError(
-            f"Model directory not found: {model_path}\n"
-            "Make sure $MODELS_DIR is set and the model has been exported with:\n"
-            "  dbtk model export <checkpoint.ckpt> <output_dir>"
-        )
-    config = PretrainedConfig.from_pretrained(model_path)
-    module_name, class_name = MODEL_TYPE_MAP[config.model_type].rsplit(".", 1)
-    model_class = getattr(importlib.import_module(module_name), class_name)
-    return model_class.from_pretrained(model_path)
-
-
-def load_eval_id_to_taxon(tax_path: Path) -> Tuple[List[str], ...]:
-    """Load taxon_id → label map from the evaluation taxonomy DB (alphabetical order)."""
-    with taxonomy.TaxonomyDb(str(tax_path)) as tax_db:
-        return tax_db.tree.id_to_taxon_map
 
 
 def build_ancestor_map(
@@ -75,7 +38,7 @@ def build_ancestor_map(
     train_id_to_taxon: List[List[str]],
 ) -> List[Optional[Dict[int, List[int]]]]:
     """
-    Build a per-rank mapping from taxon_id → list of candidate parent taxon_ids.
+    Build a per-rank mapping from taxon_id -> list of candidate parent taxon_ids.
 
     parent_map[r][taxon_id] = sorted list of candidate parent taxon_ids at rank r-1.
     parent_map[0] = None (domain has no parent).
@@ -115,7 +78,6 @@ def resolve_anchored(
 ) -> Dict[int, int]:
     """
     Walk up the tree from rank anchor_rank, resolving taxon_ids for ranks 0..anchor_rank-1.
-    Returns {rank: resolved_taxon_id} for all ranks 0..anchor_rank.
     When a taxon appears under multiple parents, the parent with the highest model
     score at that rank is selected; ties fall back to the alphabetically first candidate.
     """
@@ -147,8 +109,7 @@ def resolve_all_ancestors(
     """
     Walk up the tree from from_rank to to_rank, expanding ALL candidate parents
     at each step.  Returns the set of all reachable ancestor taxon_ids at to_rank.
-    Handles shared-name taxa (e.g. Incertae_Sedis) correctly by considering every
-    possible parent lineage rather than an arbitrary single one.
+    Handles shared-name taxa (e.g. Incertae_Sedis) correctly.
     """
     current = {taxon_id}
     for r in range(from_rank, to_rank, -1):
@@ -163,12 +124,17 @@ def resolve_all_ancestors(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate a fine-tuned DnaBert taxonomy model",
+        description="Evaluate cached taxonomy predictions from predict_taxonomy.py",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("model_path",      type=Path, help="Exported HF model directory")
-    parser.add_argument("sequences_path",  type=Path, help="Sequences FASTA DB path")
-    parser.add_argument("taxonomies_path", type=Path, help="Taxonomy DB path")
+    parser.add_argument("predictions_path", type=Path,
+                        help="Predictions .pt file from predict_taxonomy.py")
+    parser.add_argument("taxonomies_path",  type=Path,
+                        help="Taxonomy DB path (ground-truth source)")
+    parser.add_argument(
+        "--top-k", type=int, default=None,
+        help="K for top-K accuracy; must be <= stored K (default: use stored K)"
+    )
     parser.add_argument(
         "--output", type=Path, default=None,
         help="Save per-sequence results to a TSV file"
@@ -178,18 +144,6 @@ def main():
         help="Print per-sequence predictions to stdout"
     )
     parser.add_argument(
-        "--batch-size", type=int, default=256,
-        help="Inference batch size (default: 256)"
-    )
-    parser.add_argument(
-        "--top-k", type=int, default=5,
-        help="K for top-K accuracy and anchor disambiguation (default: 5)"
-    )
-    parser.add_argument(
-        "--num-workers", type=int, default=0,
-        help="DataLoader workers (default: 0)"
-    )
-    parser.add_argument(
         "--anchor-rank", type=int, default=None, metavar="K",
         help="Trust model prediction at rank K; resolve coarser ranks from the tree. "
              "Ranks finer than K remain independent. "
@@ -197,94 +151,45 @@ def main():
     )
     args = parser.parse_args()
 
+    print(f"Loading predictions from {args.predictions_path}...")
+    data = torch.load(args.predictions_path, map_location="cpu", weights_only=False)
+
+    all_seq_ids       = data['seq_ids']
+    all_pred_ids      = data['pred_ids']       # [N, R]
+    all_topk_ids      = data['topk_ids']       # [N, R, K_stored]
+    all_topk_scores   = data['topk_scores']    # [N, R, K_stored]
+    rank_labels       = data['rank_labels']
+    parent_indices    = data['parent_indices']
+    train_id_to_taxon = data['train_id_to_taxon']
+    stored_k          = data['top_k']
+
+    top_k = args.top_k if args.top_k is not None else stored_k
+    if top_k > stored_k:
+        print(f"ERROR: --top-k {top_k} exceeds the K={stored_k} stored in the predictions file")
+        sys.exit(1)
+
+    # Trim the K dimension if a smaller top-k was requested
+    all_topk_ids    = all_topk_ids[:, :, :top_k]
+    all_topk_scores = all_topk_scores[:, :, :top_k]
+
+    n, num_ranks = all_pred_ids.shape
+
+    # Load ground-truth labels from the taxonomy DB
+    print(f"Loading ground-truth labels from {args.taxonomies_path}...")
+    with taxonomy.TaxonomyDb(str(args.taxonomies_path)) as tax_db:
+        eval_id_to_taxon = list(tax_db.tree.id_to_taxon_map)
+        true_ids_list = [
+            tax_db[seq_id].taxonomy.taxon_ids
+            for seq_id in track(all_seq_ids, description="  Reading labels")
+        ]
+    all_true_ids = torch.tensor(true_ids_list, dtype=torch.long)  # [N, R]
+
     anchor_rank = args.anchor_rank
     anchoring = anchor_rank is not None and anchor_rank > 0
 
-    # Load model
-    model = load_model(args.model_path)
-    model._predict_top_k = args.top_k
-    num_ranks = model.num_ranks
-
-    # Build pred_id → label map from the model's embedded rank_labels.
-    # rank_labels is stored in taxonomy_id (DFS) order; sorting each rank
-    # alphabetically recovers taxon_id order, matching model prediction IDs.
-    train_id_to_taxon = [
-        sorted(set(label.strip() for label in labels))
-        for labels in model.config.rank_labels
-    ]
-
-    # Build ancestor map for anchor mode
     parent_map = None
     if anchoring:
-        parent_map = build_ancestor_map(
-            model.config.rank_labels,
-            model.config.parent_indices,
-            train_id_to_taxon,
-        )
-
-    # Load taxon_id → label map from the evaluation taxonomy DB.
-    # LMDB cannot be opened twice in one process, so we load into memory
-    # and close before trainer.predict() reopens it via the datamodule.
-    print("Loading eval taxonomy label map...")
-    eval_id_to_taxon = load_eval_id_to_taxon(args.taxonomies_path)
-
-    # Predict datamodule
-    dm = DnaBertTaxonomyPredictDataModule(
-        tokenizer=model.tokenizer,
-        sequences_path=args.sequences_path,
-        taxonomies_path=args.taxonomies_path,
-        max_length=model.base.config.max_length,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-    )
-
-    # Run inference via Lightning Trainer
-    trainer = L.Trainer(
-        accelerator="auto",
-        devices="auto",
-        logger=False,
-        enable_model_summary=False,
-    )
-    outputs = trainer.predict(model, datamodule=dm)
-
-    # Aggregate results across batches
-    all_seq_ids = []
-    pred_ids_list, true_ids_list, topk_ids_list, topk_scores_list = [], [], [], []
-    for seq_ids, pred_ids, true_ids, topk_ids, topk_scores in outputs:
-        all_seq_ids.extend(seq_ids)
-        pred_ids_list.append(pred_ids)
-        true_ids_list.append(true_ids)
-        topk_ids_list.append(topk_ids)
-        topk_scores_list.append(topk_scores)
-
-    all_pred_ids    = torch.cat(pred_ids_list,    dim=0)  # [N, R]
-    all_true_ids    = torch.cat(true_ids_list,    dim=0)  # [N, R]
-    all_topk_ids    = torch.cat(topk_ids_list,    dim=0)  # [N, R, k]
-    all_topk_scores = torch.cat(topk_scores_list, dim=0)  # [N, R, k]
-
-    # In DDP each rank holds only its shard. Gather everything onto rank 0
-    # so we print a single merged table; non-rank-0 processes exit early.
-    if trainer.world_size > 1:
-        import torch.distributed as dist
-        local_payload = (
-            all_seq_ids,
-            all_pred_ids.cpu(),
-            all_true_ids.cpu(),
-            all_topk_ids.cpu(),
-            all_topk_scores.cpu(),
-        )
-        gathered = [None] * trainer.world_size
-        dist.all_gather_object(gathered, local_payload)
-        if trainer.global_rank != 0:
-            return
-        seq_lists, pred_list, true_list, topk_list, scores_list = zip(*gathered)
-        all_seq_ids     = [sid for sids in seq_lists for sid in sids]
-        all_pred_ids    = torch.cat(pred_list,   dim=0)
-        all_true_ids    = torch.cat(true_list,   dim=0)
-        all_topk_ids    = torch.cat(topk_list,   dim=0)
-        all_topk_scores = torch.cat(scores_list, dim=0)
-
-    n = len(all_seq_ids)
+        parent_map = build_ancestor_map(rank_labels, parent_indices, train_id_to_taxon)
 
     def pred_label(r: int, tid: int) -> str:
         labels = train_id_to_taxon[r]
@@ -294,16 +199,13 @@ def main():
         labels = eval_id_to_taxon[r]
         return labels[tid].strip() if 0 <= tid < len(labels) else ""
 
-    # Determine which ranks are anchored (resolved from tree) vs independent
-    # rank r is anchored if anchor mode is active and r <= anchor_rank
     is_anchored = [
         (anchoring and r < anchor_rank)
         for r in range(num_ranks)
     ]
 
-    # Single pass: resolve labels and compute top-1 / top-k correctness.
     true_parts, pred_parts, top1_correct, topk_correct = [], [], [], []
-    tree_inconsistencies = 0  # correct anchor in top-k but resolved ancestor is wrong
+    tree_inconsistencies = 0
     for i in track(range(n), description="Computing accuracy"):
         tp = [true_label(r, all_true_ids[i, r].item()) for r in range(num_ranks)]
 
@@ -312,8 +214,8 @@ def main():
                 all_pred_ids[i, anchor_rank].item(),
                 anchor_rank,
                 parent_map,
-                all_topk_ids[i],    # [R, k]
-                all_topk_scores[i], # [R, k]
+                all_topk_ids[i],
+                all_topk_scores[i],
             )
             pp = [
                 pred_label(r, resolved[r]) if r in resolved else pred_label(r, all_pred_ids[i, r].item())
@@ -327,10 +229,7 @@ def main():
         top1_correct.append([pp[r] == tp[r] for r in range(num_ranks)])
 
         if anchoring:
-            # For ranks coarser than anchor: top-k = is the true ancestor reachable
-            # from any of the top-k predictions at the anchor rank?
-            # For the anchor rank and finer: standard independent top-k.
-            anchor_topk_ids = {all_topk_ids[i, anchor_rank, j].item() for j in range(args.top_k)}
+            anchor_topk_ids = {all_topk_ids[i, anchor_rank, j].item() for j in range(top_k)}
             true_anchor_id  = all_true_ids[i, anchor_rank].item()
             anchor_correct_in_topk = true_anchor_id in anchor_topk_ids
             seq_inconsistent = False
@@ -340,17 +239,13 @@ def main():
                 if is_anchored[r] and r < anchor_rank:
                     true_r_id = all_true_ids[i, r].item()
                     reachable_ids: set = set()
-                    for j in range(args.top_k):
+                    for j in range(top_k):
                         reachable_ids.update(resolve_all_ancestors(
                             all_topk_ids[i, anchor_rank, j].item(),
                             anchor_rank, r, parent_map,
                         ))
                     topk_reachable.append(true_r_id in reachable_ids)
 
-                    # Sanity check: if the correct anchor taxon is in the top-k, all
-                    # valid parent paths from it should reach the correct ancestor.
-                    # A mismatch means the model's embedded taxonomy diverges from the
-                    # evaluation DB (e.g. a taxon reclassified between SILVA versions).
                     if anchor_correct_in_topk and not seq_inconsistent:
                         reachable_from_true = resolve_all_ancestors(
                             true_anchor_id, anchor_rank, r, parent_map,
@@ -359,20 +254,19 @@ def main():
                             seq_inconsistent = True
                 else:
                     topk_reachable.append(
-                        tp[r] in {pred_label(r, all_topk_ids[i, r, j].item()) for j in range(args.top_k)}
+                        tp[r] in {pred_label(r, all_topk_ids[i, r, j].item()) for j in range(top_k)}
                     )
             tree_inconsistencies += seq_inconsistent
             topk_correct.append(topk_reachable)
         else:
             topk_correct.append([
-                tp[r] in {pred_label(r, all_topk_ids[i, r, j].item()) for j in range(args.top_k)}
+                tp[r] in {pred_label(r, all_topk_ids[i, r, j].item()) for j in range(top_k)}
                 for r in range(num_ranks)
             ])
 
     top1_acc = [sum(top1_correct[i][r] for i in range(n)) / n for r in range(num_ranks)]
     topk_acc = [sum(topk_correct[i][r] for i in range(n)) / n for r in range(num_ranks)]
 
-    # Per-sequence output (TSV)
     if args.output or args.show_predictions:
         out = open(args.output, "w") if args.output else sys.stdout
 
@@ -383,17 +277,16 @@ def main():
         rank_headers = "\t".join(col_name(r) for r in range(num_ranks))
         out.write(f"sequence_id\tground_truth\tpredicted\t{rank_headers}\n")
         for i, seq_id in track(enumerate(all_seq_ids), total=n, description="Writing results"):
-            gt       = ";".join(true_parts[i])
-            pred     = ";".join(pred_parts[i])
+            gt        = ";".join(true_parts[i])
+            pred      = ";".join(pred_parts[i])
             rank_cols = "\t".join("Y" if top1_correct[i][r] else "N" for r in range(num_ranks))
             out.write(f"{seq_id}\t{gt}\t{pred}\t{rank_cols}\n")
         if out is not sys.stdout:
             out.close()
 
-    # Summary table
-    k = args.top_k
+    k = top_k
     if anchoring:
-        print(f"\nResults ({n} sequences, anchor-rank={anchor_rank}):")
+        print(f"\nResults ({n:,} sequences, anchor-rank={anchor_rank}):")
         header = f"{'Rank':<8}  {'Top-1':>8}  {f'Top-{k}':>8}  {'Anchored':>8}"
         print(header)
         print("-" * len(header))
@@ -408,7 +301,7 @@ def main():
                 "than the evaluation DB (e.g. a taxon was reclassified between SILVA versions)."
             )
     else:
-        print(f"\nResults ({n} sequences):")
+        print(f"\nResults ({n:,} sequences):")
         print(f"{'Rank':<8}  {'Top-1':>8}  {f'Top-{k}':>8}")
         print("-" * 30)
         for rank in range(num_ranks):

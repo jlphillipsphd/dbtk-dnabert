@@ -408,8 +408,10 @@ class DnaBertForTaxonomy(DbtkModel):
         return self._step("test", batch)
 
     def predict_step(self, batch, batch_idx):
-        if len(batch) == 2:
-            # Genus-only prediction from DnaBertFastaPredictDataModule.
+        top_k = getattr(self, '_predict_top_k', 1)
+
+        if len(batch) == 2 and isinstance(batch[0], torch.Tensor):
+            # Genus-only path from DnaBertFastaPredictDataModule.
             # Returns (sequence_indices [B], genus_pred_ids [B]).
             seq_indices, tokens = batch
             output = self(tokens)
@@ -419,8 +421,10 @@ class DnaBertForTaxonomy(DbtkModel):
                 genus_pred = output.argmax(-1)
             return seq_indices.cpu(), genus_pred.cpu()
 
-        top_k = getattr(self, '_predict_top_k', 5)
-        seq_ids, tokens, true_ids = batch
+        # Full multi-rank top-k path from DnaBertTaxonomyPredictDataModule.
+        # Batch is (seq_ids, tokens).
+        seq_ids, tokens = batch
+
         output = self(tokens)
         if isinstance(output, list):
             pred_ids = torch.stack([l.argmax(-1) for l in output], dim=1)  # [B, R]
@@ -446,7 +450,8 @@ class DnaBertForTaxonomy(DbtkModel):
             ], dim=1)  # [B, R, k]
             # Broadcast leaf scores across ranks (each ancestor's score = its leaf's score)
             topk_scores = top_k_values.unsqueeze(1).expand(-1, self.num_ranks, -1)  # [B, R, k]
-        return seq_ids, pred_ids.cpu(), true_ids.cpu(), topk_ids.cpu(), topk_scores.cpu()
+
+        return seq_ids, pred_ids.cpu(), topk_ids.cpu(), topk_scores.cpu()
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-4)

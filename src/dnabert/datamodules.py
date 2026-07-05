@@ -198,18 +198,16 @@ class DnaBertTaxonomyDataModule(L.LightningDataModule):
         )
 
 
-class DnaBertTaxonomyEvalDataset(torch.utils.data.Dataset):
-    """Dataset for deterministic evaluation: returns (seq_id, tokens, taxon_ids)."""
+class DnaBertSequenceEvalDataset(torch.utils.data.Dataset):
+    """Dataset for deterministic prediction from sequences alone: returns (seq_id, tokens)."""
 
     def __init__(
         self,
         fasta_db: fasta.FastaDb,
-        tax_db: taxonomy.TaxonomyDb,
         tokenizer: DnaTokenizer,
         max_length: int
     ):
         self.fasta_db = fasta_db
-        self.tax_db = tax_db
         self.tokenizer = tokenizer
         self.max_length = max_length
         self._ids = [entry.identifier for entry in fasta_db]
@@ -220,22 +218,24 @@ class DnaBertTaxonomyEvalDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         seq_id = self._ids[idx]
         sequence = self.fasta_db[seq_id].sequence
-        taxon_ids = torch.tensor(self.tax_db[seq_id].taxonomy.taxon_ids, dtype=torch.long)
         kmer, stride = self.tokenizer.kmer, self.tokenizer.kmer_stride
         max_bp = self.max_length * stride - stride + kmer
         tokens = torch.tensor(self.tokenizer(sequence[:max_bp]))
         tokens = F.pad(tokens, (0, self.max_length - len(tokens)), value=self.tokenizer.vocab["[PAD]"])
-        return seq_id, tokens, taxon_ids
+        return seq_id, tokens
 
 
 class DnaBertTaxonomyPredictDataModule(L.LightningDataModule):
-    """Predict-only datamodule for taxonomy evaluation."""
+    """Predict-only datamodule for taxonomy prediction.
+
+    Yields (seq_ids, tokens) batches from a FASTA DB.  No taxonomy DB is needed;
+    ground-truth labels are supplied separately at evaluation time.
+    """
 
     def __init__(
         self,
         tokenizer: DnaTokenizer,
         sequences_path: Union[str, Path],
-        taxonomies_path: Union[str, Path],
         max_length: int = 250,
         batch_size: int = 256,
         num_workers: int = 0
@@ -243,16 +243,15 @@ class DnaBertTaxonomyPredictDataModule(L.LightningDataModule):
         super().__init__()
         self.tokenizer = tokenizer
         self.sequences_path = sequences_path
-        self.taxonomies_path = taxonomies_path
         self.max_length = max_length
         self.batch_size = batch_size
         self.num_workers = num_workers
 
     def setup(self, stage: str):
         if stage == "predict":
-            fasta_db = fasta.FastaDb(self.sequences_path)
-            tax_db = taxonomy.TaxonomyDb(self.taxonomies_path, fasta_db)
-            self.dataset = DnaBertTaxonomyEvalDataset(fasta_db, tax_db, self.tokenizer, self.max_length)
+            self.dataset = DnaBertSequenceEvalDataset(
+                fasta.FastaDb(self.sequences_path), self.tokenizer, self.max_length
+            )
 
     def predict_dataloader(self):
         return torch.utils.data.DataLoader(
@@ -264,8 +263,8 @@ class DnaBertTaxonomyPredictDataModule(L.LightningDataModule):
         )
 
     def _collate(self, batch):
-        seq_ids, tokens, taxon_ids = zip(*batch)
-        return list(seq_ids), torch.stack(tokens), torch.stack(taxon_ids)
+        seq_ids, tokens = zip(*batch)
+        return list(seq_ids), torch.stack(tokens)
 
 
 class DnaBertFastaPredictDataset(torch.utils.data.Dataset):
