@@ -410,19 +410,6 @@ class DnaBertForTaxonomy(DbtkModel):
     def predict_step(self, batch, batch_idx):
         top_k = getattr(self, '_predict_top_k', 1)
 
-        if len(batch) == 2 and isinstance(batch[0], torch.Tensor):
-            # Genus-only path from DnaBertFastaPredictDataModule.
-            # Returns (sequence_indices [B], genus_pred_ids [B]).
-            seq_indices, tokens = batch
-            output = self(tokens)
-            if isinstance(output, list):
-                genus_pred = output[-1].argmax(-1)
-            else:
-                genus_pred = output.argmax(-1)
-            return seq_indices.cpu(), genus_pred.cpu()
-
-        # Full multi-rank top-k path from DnaBertTaxonomyPredictDataModule.
-        # Batch is (seq_ids, tokens).
         seq_ids, tokens = batch
 
         output = self(tokens)

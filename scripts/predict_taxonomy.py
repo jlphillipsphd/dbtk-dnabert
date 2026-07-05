@@ -24,7 +24,7 @@ import lightning as L
 import torch
 from transformers import PretrainedConfig
 
-from dnabert.datamodules import DnaBertTaxonomyPredictDataModule
+from dnabert.datamodules import DnaBertSequencePredictDataModule
 
 MODEL_TYPE_MAP = {
     "dnabert_for_taxonomy": "dnabert.models.DnaBertForTaxonomy",
@@ -70,7 +70,7 @@ def main():
         for labels in model.config.rank_labels
     ]
 
-    dm = DnaBertTaxonomyPredictDataModule(
+    dm = DnaBertSequencePredictDataModule(
         tokenizer=model.tokenizer,
         sequences_path=args.sequences_path,
         max_length=model.base.config.max_length,
