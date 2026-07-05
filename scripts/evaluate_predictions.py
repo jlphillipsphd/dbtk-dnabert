@@ -5,6 +5,10 @@ Evaluate cached taxonomy predictions produced by predict_taxonomy.py.
 Computes top-1 and top-k accuracy per rank from a .pt predictions file and a
 taxonomy DB (the ground-truth source).  No model is needed at evaluation time.
 
+The accuracy computation loop runs in parallel across sequences using Python's
+multiprocessing module.  Use --num-workers to control the pool size (default: 4,
+set to 0 for sequential execution).
+
 Supports anchor-rank mode: rank K is trusted; coarser ranks are resolved by
 walking up the stored taxonomy tree rather than using independent predictions.
 The --top-k flag may be set to any value <= the K stored in the predictions file,
@@ -23,14 +27,19 @@ Example:
 
 import argparse
 import sys
+from multiprocessing import Pool
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from rich.progress import track
 
 import torch
 from dnadb import taxonomy
 
+
+# ---------------------------------------------------------------------------
+# Tree traversal helpers
+# ---------------------------------------------------------------------------
 
 def build_ancestor_map(
     rank_labels: List[List[str]],
@@ -40,7 +49,7 @@ def build_ancestor_map(
     """
     Build a per-rank mapping from taxon_id -> list of candidate parent taxon_ids.
 
-    parent_map[r][taxon_id] = sorted list of candidate parent taxon_ids at rank r-1.
+    parent_map[r][taxon_id] = list of candidate parent taxon_ids at rank r-1.
     parent_map[0] = None (domain has no parent).
     The list has more than one entry only when the same label appears under
     multiple parents (shared taxon name within a rank).
@@ -73,8 +82,8 @@ def resolve_anchored(
     pred_taxon_id_k: int,
     anchor_rank: int,
     parent_map: List[Optional[Dict[int, List[int]]]],
-    topk_ids_seq: torch.Tensor,    # [R, K]
-    topk_scores_seq: torch.Tensor, # [R, K]
+    topk_ids_seq,    # List[List[int]]  shape [R][K]
+    topk_scores_seq, # List[List[float]] shape [R][K]
 ) -> Dict[int, int]:
     """
     Walk up the tree from rank anchor_rank, resolving taxon_ids for ranks 0..anchor_rank-1.
@@ -92,8 +101,8 @@ def resolve_anchored(
         else:
             parent_rank = r - 1
             score_dict = {
-                int(topk_ids_seq[parent_rank, j]): float(topk_scores_seq[parent_rank, j])
-                for j in range(topk_ids_seq.shape[1])
+                int(topk_ids_seq[parent_rank][j]): float(topk_scores_seq[parent_rank][j])
+                for j in range(len(topk_ids_seq[parent_rank]))
             }
             current = max(candidates, key=lambda c: score_dict.get(c, float('-inf')))
         resolved[r - 1] = current
@@ -122,6 +131,106 @@ def resolve_all_ancestors(
     return current
 
 
+# ---------------------------------------------------------------------------
+# Per-sequence computation — module level so multiprocessing can pickle it
+# ---------------------------------------------------------------------------
+
+_w_train_id_to_taxon: Optional[List[List[str]]] = None
+_w_eval_id_to_taxon:  Optional[List[List[str]]] = None
+_w_parent_map:        Optional[List] = None
+_w_anchor_rank:       Optional[int] = None
+_w_top_k:             Optional[int] = None
+_w_num_ranks:         Optional[int] = None
+_w_anchoring:         Optional[bool] = None
+
+
+def _worker_init(train_id_to_taxon, eval_id_to_taxon, parent_map,
+                 anchor_rank, top_k, num_ranks, anchoring):
+    global _w_train_id_to_taxon, _w_eval_id_to_taxon, _w_parent_map
+    global _w_anchor_rank, _w_top_k, _w_num_ranks, _w_anchoring
+    _w_train_id_to_taxon = train_id_to_taxon
+    _w_eval_id_to_taxon  = eval_id_to_taxon
+    _w_parent_map        = parent_map
+    _w_anchor_rank       = anchor_rank
+    _w_top_k             = top_k
+    _w_num_ranks         = num_ranks
+    _w_anchoring         = anchoring
+
+
+def _process_sequence(seq_args: Tuple) -> Tuple:
+    """
+    Compute accuracy metrics for a single sequence.
+    Input args are plain Python lists (converted from tensors by the caller).
+    Returns (tp, pp, top1, topk_reachable, inconsistent).
+    """
+    true_ids_i, pred_ids_i, topk_ids_i, topk_scores_i = seq_args
+
+    num_ranks   = _w_num_ranks
+    top_k       = _w_top_k
+    anchoring   = _w_anchoring
+    anchor_rank = _w_anchor_rank
+
+    def pred_lbl(r: int, tid: int) -> str:
+        labels = _w_train_id_to_taxon[r]
+        return labels[tid] if 0 <= tid < len(labels) else ""
+
+    def true_lbl(r: int, tid: int) -> str:
+        labels = _w_eval_id_to_taxon[r]
+        return labels[tid].strip() if 0 <= tid < len(labels) else ""
+
+    tp = [true_lbl(r, true_ids_i[r]) for r in range(num_ranks)]
+
+    if anchoring:
+        resolved = resolve_anchored(
+            pred_ids_i[anchor_rank], anchor_rank, _w_parent_map,
+            topk_ids_i, topk_scores_i,
+        )
+        pp = [
+            pred_lbl(r, resolved[r]) if r in resolved else pred_lbl(r, pred_ids_i[r])
+            for r in range(num_ranks)
+        ]
+    else:
+        pp = [pred_lbl(r, pred_ids_i[r]) for r in range(num_ranks)]
+
+    top1 = [pp[r] == tp[r] for r in range(num_ranks)]
+
+    if anchoring:
+        anchor_topk_set  = set(topk_ids_i[anchor_rank])
+        true_anchor_id   = true_ids_i[anchor_rank]
+        anchor_in_topk   = true_anchor_id in anchor_topk_set
+        seq_inconsistent = False
+        topk_reachable   = []
+
+        for r in range(num_ranks):
+            if r < anchor_rank:
+                true_r_id = true_ids_i[r]
+                reachable_ids: set = set()
+                for j in range(top_k):
+                    reachable_ids.update(resolve_all_ancestors(
+                        topk_ids_i[anchor_rank][j], anchor_rank, r, _w_parent_map,
+                    ))
+                topk_reachable.append(true_r_id in reachable_ids)
+                if anchor_in_topk and not seq_inconsistent:
+                    if true_r_id not in resolve_all_ancestors(
+                            true_anchor_id, anchor_rank, r, _w_parent_map):
+                        seq_inconsistent = True
+            else:
+                topk_reachable.append(
+                    tp[r] in {pred_lbl(r, topk_ids_i[r][j]) for j in range(top_k)}
+                )
+        return tp, pp, top1, topk_reachable, seq_inconsistent
+
+    topk_reachable = [
+        tp[r] in {pred_lbl(r, topk_ids_i[r][j]) for j in range(top_k)}
+        for r in range(num_ranks)
+    ]
+    return tp, pp, top1, topk_reachable, False
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main():
     parser = argparse.ArgumentParser(
         description="Evaluate cached taxonomy predictions from predict_taxonomy.py",
@@ -149,10 +258,14 @@ def main():
              "Ranks finer than K remain independent. "
              "--anchor-rank 0 is equivalent to independent mode."
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--num-workers", type=int, default=4,
+        help="Parallel workers for the accuracy computation loop (default: 4, 0=sequential)"
+    )
+    cli = parser.parse_args()
 
-    print(f"Loading predictions from {args.predictions_path}...")
-    data = torch.load(args.predictions_path, map_location="cpu", weights_only=False)
+    print(f"Loading predictions from {cli.predictions_path}...")
+    data = torch.load(cli.predictions_path, map_location="cpu", weights_only=False)
 
     all_seq_ids       = data['seq_ids']
     all_pred_ids      = data['pred_ids']       # [N, R]
@@ -163,20 +276,18 @@ def main():
     train_id_to_taxon = data['train_id_to_taxon']
     stored_k          = data['top_k']
 
-    top_k = args.top_k if args.top_k is not None else stored_k
+    top_k = cli.top_k if cli.top_k is not None else stored_k
     if top_k > stored_k:
         print(f"ERROR: --top-k {top_k} exceeds the K={stored_k} stored in the predictions file")
         sys.exit(1)
 
-    # Trim the K dimension if a smaller top-k was requested
     all_topk_ids    = all_topk_ids[:, :, :top_k]
     all_topk_scores = all_topk_scores[:, :, :top_k]
 
     n, num_ranks = all_pred_ids.shape
 
-    # Load ground-truth labels from the taxonomy DB
-    print(f"Loading ground-truth labels from {args.taxonomies_path}...")
-    with taxonomy.TaxonomyDb(str(args.taxonomies_path)) as tax_db:
+    print(f"Loading ground-truth labels from {cli.taxonomies_path}...")
+    with taxonomy.TaxonomyDb(str(cli.taxonomies_path)) as tax_db:
         eval_id_to_taxon = list(tax_db.tree.id_to_taxon_map)
         true_ids_list = [
             tax_db[seq_id].taxonomy.taxon_ids
@@ -184,91 +295,57 @@ def main():
         ]
     all_true_ids = torch.tensor(true_ids_list, dtype=torch.long)  # [N, R]
 
-    anchor_rank = args.anchor_rank
+    anchor_rank = cli.anchor_rank
     anchoring = anchor_rank is not None and anchor_rank > 0
 
     parent_map = None
     if anchoring:
         parent_map = build_ancestor_map(rank_labels, parent_indices, train_id_to_taxon)
 
-    def pred_label(r: int, tid: int) -> str:
-        labels = train_id_to_taxon[r]
-        return labels[tid] if 0 <= tid < len(labels) else ""
+    is_anchored = [(anchoring and r < anchor_rank) for r in range(num_ranks)]
 
-    def true_label(r: int, tid: int) -> str:
-        labels = eval_id_to_taxon[r]
-        return labels[tid].strip() if 0 <= tid < len(labels) else ""
+    # Shared initialisation args for workers (or sequential setup)
+    init_args = (train_id_to_taxon, eval_id_to_taxon, parent_map,
+                 anchor_rank, top_k, num_ranks, anchoring)
 
-    is_anchored = [
-        (anchoring and r < anchor_rank)
-        for r in range(num_ranks)
-    ]
+    def seq_args_iter():
+        for i in range(n):
+            yield (
+                all_true_ids[i].tolist(),
+                all_pred_ids[i].tolist(),
+                all_topk_ids[i].tolist(),
+                all_topk_scores[i].tolist(),
+            )
 
     true_parts, pred_parts, top1_correct, topk_correct = [], [], [], []
     tree_inconsistencies = 0
-    for i in track(range(n), description="Computing accuracy"):
-        tp = [true_label(r, all_true_ids[i, r].item()) for r in range(num_ranks)]
 
-        if anchoring:
-            resolved = resolve_anchored(
-                all_pred_ids[i, anchor_rank].item(),
-                anchor_rank,
-                parent_map,
-                all_topk_ids[i],
-                all_topk_scores[i],
-            )
-            pp = [
-                pred_label(r, resolved[r]) if r in resolved else pred_label(r, all_pred_ids[i, r].item())
-                for r in range(num_ranks)
-            ]
-        else:
-            pp = [pred_label(r, all_pred_ids[i, r].item()) for r in range(num_ranks)]
-
-        true_parts.append(tp)
-        pred_parts.append(pp)
-        top1_correct.append([pp[r] == tp[r] for r in range(num_ranks)])
-
-        if anchoring:
-            anchor_topk_ids = {all_topk_ids[i, anchor_rank, j].item() for j in range(top_k)}
-            true_anchor_id  = all_true_ids[i, anchor_rank].item()
-            anchor_correct_in_topk = true_anchor_id in anchor_topk_ids
-            seq_inconsistent = False
-
-            topk_reachable = []
-            for r in range(num_ranks):
-                if is_anchored[r] and r < anchor_rank:
-                    true_r_id = all_true_ids[i, r].item()
-                    reachable_ids: set = set()
-                    for j in range(top_k):
-                        reachable_ids.update(resolve_all_ancestors(
-                            all_topk_ids[i, anchor_rank, j].item(),
-                            anchor_rank, r, parent_map,
-                        ))
-                    topk_reachable.append(true_r_id in reachable_ids)
-
-                    if anchor_correct_in_topk and not seq_inconsistent:
-                        reachable_from_true = resolve_all_ancestors(
-                            true_anchor_id, anchor_rank, r, parent_map,
-                        )
-                        if true_r_id not in reachable_from_true:
-                            seq_inconsistent = True
-                else:
-                    topk_reachable.append(
-                        tp[r] in {pred_label(r, all_topk_ids[i, r, j].item()) for j in range(top_k)}
-                    )
-            tree_inconsistencies += seq_inconsistent
-            topk_correct.append(topk_reachable)
-        else:
-            topk_correct.append([
-                tp[r] in {pred_label(r, all_topk_ids[i, r, j].item()) for j in range(top_k)}
-                for r in range(num_ranks)
-            ])
+    n_workers = cli.num_workers
+    if n_workers > 0:
+        with Pool(n_workers, initializer=_worker_init, initargs=init_args) as pool:
+            result_iter = pool.imap(_process_sequence, seq_args_iter(), chunksize=512)
+            for tp, pp, top1, topk, incon in track(
+                    result_iter, total=n, description="Computing accuracy"):
+                true_parts.append(tp)
+                pred_parts.append(pp)
+                top1_correct.append(top1)
+                topk_correct.append(topk)
+                tree_inconsistencies += incon
+    else:
+        _worker_init(*init_args)
+        for seq_arg in track(seq_args_iter(), total=n, description="Computing accuracy"):
+            tp, pp, top1, topk, incon = _process_sequence(seq_arg)
+            true_parts.append(tp)
+            pred_parts.append(pp)
+            top1_correct.append(top1)
+            topk_correct.append(topk)
+            tree_inconsistencies += incon
 
     top1_acc = [sum(top1_correct[i][r] for i in range(n)) / n for r in range(num_ranks)]
     topk_acc = [sum(topk_correct[i][r] for i in range(n)) / n for r in range(num_ranks)]
 
-    if args.output or args.show_predictions:
-        out = open(args.output, "w") if args.output else sys.stdout
+    if cli.output or cli.show_predictions:
+        out = open(cli.output, "w") if cli.output else sys.stdout
 
         def col_name(r: int) -> str:
             base = f"rank{r}_correct"
