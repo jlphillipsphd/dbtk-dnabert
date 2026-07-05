@@ -138,20 +138,26 @@ def resolve_anchored(
     return resolved
 
 
-def resolve_first(
+def resolve_all_ancestors(
     taxon_id: int,
     from_rank: int,
     to_rank: int,
     parent_map: List[Optional[Dict[int, List[int]]]],
-) -> int:
+) -> set:
     """
-    Walk up the tree from from_rank to to_rank, always picking the first (alphabetically
-    lowest) candidate parent.  Used to build the set of reachable ancestors for top-k.
+    Walk up the tree from from_rank to to_rank, expanding ALL candidate parents
+    at each step.  Returns the set of all reachable ancestor taxon_ids at to_rank.
+    Handles shared-name taxa (e.g. Incertae_Sedis) correctly by considering every
+    possible parent lineage rather than an arbitrary single one.
     """
-    current = taxon_id
+    current = {taxon_id}
     for r in range(from_rank, to_rank, -1):
-        candidates = parent_map[r].get(current, [])
-        current = candidates[0] if candidates else -1
+        next_set = set()
+        for tid in current:
+            next_set.update(parent_map[r].get(tid, []))
+        current = next_set
+        if not current:
+            break
     return current
 
 
@@ -332,23 +338,24 @@ def main():
             topk_reachable = []
             for r in range(num_ranks):
                 if is_anchored[r] and r < anchor_rank:
-                    ancestor_labels = {
-                        pred_label(r, resolve_first(
+                    true_r_id = all_true_ids[i, r].item()
+                    reachable_ids: set = set()
+                    for j in range(args.top_k):
+                        reachable_ids.update(resolve_all_ancestors(
                             all_topk_ids[i, anchor_rank, j].item(),
                             anchor_rank, r, parent_map,
                         ))
-                        for j in range(args.top_k)
-                    }
-                    topk_reachable.append(tp[r] in ancestor_labels)
+                    topk_reachable.append(true_r_id in reachable_ids)
 
-                    # Sanity check: if the correct anchor taxon is in the top-k, resolving
-                    # it upward should always yield the correct ancestor. A mismatch means
-                    # the model's embedded taxonomy tree diverges from the eval taxonomy DB.
+                    # Sanity check: if the correct anchor taxon is in the top-k, all
+                    # valid parent paths from it should reach the correct ancestor.
+                    # A mismatch means the model's embedded taxonomy diverges from the
+                    # evaluation DB (e.g. a taxon reclassified between SILVA versions).
                     if anchor_correct_in_topk and not seq_inconsistent:
-                        resolved_ancestor = pred_label(r, resolve_first(
+                        reachable_from_true = resolve_all_ancestors(
                             true_anchor_id, anchor_rank, r, parent_map,
-                        ))
-                        if resolved_ancestor != tp[r]:
+                        )
+                        if true_r_id not in reachable_from_true:
                             seq_inconsistent = True
                 else:
                     topk_reachable.append(
