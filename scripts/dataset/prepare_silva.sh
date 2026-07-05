@@ -20,7 +20,7 @@
 #   --full-length             Also create full-length datasets     (default: off)
 #   --num-jobs N              Parallel jobs for extract-reads      (default: 1)
 #   --qiime2-env ENV          Conda environment for QIIME2         (default: qiime2)
-#   --taxonomy-depth N        Taxonomy depth for dnadb import      (default: 7)
+#   --taxonomy-depth N        Taxonomy depth for dnadb import      (default: 6)
 #   --min-sequence-length N   Minimum bp for amplicon/test filter  (default: 150)
 #   --overwrite               Remove and rerun each step
 #   --help                    Show this message
@@ -40,7 +40,7 @@ DO_AMPLICONS=true
 DO_FULL_LENGTH=false
 NUM_JOBS=1
 QIIME2_ENV="qiime2"
-TAXONOMY_DEPTH=7
+TAXONOMY_DEPTH=6
 MIN_SEQUENCE_LENGTH=150
 OVERWRITE=false
 
