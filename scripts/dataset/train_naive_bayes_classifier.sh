@@ -134,7 +134,7 @@ step "${classifier_qza}" "Training Naive Bayes classifier (this may take several
         --i-reference-taxonomy "${tax_qza}" \
         --o-classifier         "${classifier_qza}"
 
-step "${extracted_dir}/sklearn_pipeline.pkl" "Extracting sklearn_pipeline.pkl from classifier artifact" \
+step "${extracted_dir}/sklearn_pipeline.tar" "Extracting classifier artifact" \
     conda run -n "${QIIME2_ENV}" qiime tools export \
         --input-path  "${classifier_qza}" \
         --output-path "${extracted_dir}"
@@ -145,5 +145,5 @@ echo ""
 echo "Classifier artifacts:"
 echo "  ${classifier_qza}"
 echo "    -> QIIME2 TaxonomicClassifier artifact"
-echo "  ${extracted_dir}/sklearn_pipeline.pkl"
-echo "    -> scikit-learn Pipeline for prediction scripts"
+echo "  ${extracted_dir}/sklearn_pipeline.tar"
+echo "    -> scikit-learn Pipeline (tar) for prediction scripts"
