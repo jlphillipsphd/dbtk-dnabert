@@ -29,28 +29,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import torch
-from dnadb import fasta, taxonomy
+from dnadb import fasta
+from dnabert.models import load_taxonomy
 from rich.progress import track
 
 
 UNASSIGNED = "Unassigned"
-
-
-def load_taxonomy_tree(
-    taxonomy_path: Path,
-) -> Tuple[List[List[str]], List[List[int]]]:
-    """Load rank_labels and parent_indices from a TaxonomyDb (training taxonomy)."""
-    rank_labels: List[List[str]] = []
-    parent_indices: List[List[int]] = []
-    with taxonomy.TaxonomyDb(str(taxonomy_path)) as tax_db:
-        tree = tax_db.tree
-    for rank, taxons in enumerate(tree.taxonomy_id_map):
-        rank_labels.append([t.taxon_label.strip() for t in taxons])
-        if rank == 0:
-            parent_indices.append([])
-        else:
-            parent_indices.append([t.parent.taxonomy_id for t in taxons])
-    return rank_labels, parent_indices
 
 
 def load_predictions(
@@ -106,12 +90,13 @@ def main():
         return
 
     print(f"Loading training taxonomy from {args.taxonomy_db}...")
-    rank_labels, parent_indices = load_taxonomy_tree(args.taxonomy_db)
+    rank_labels, parent_indices, _ = load_taxonomy(args.taxonomy_db)
     num_ranks = len(rank_labels)
-    train_id_to_taxon = [sorted(set(labels)) for labels in rank_labels]
+    # rank_labels is now alphabetically sorted (same as train_id_to_taxon)
+    train_id_to_taxon = rank_labels
     label_to_id = [
         {label: i for i, label in enumerate(labels)}
-        for labels in train_id_to_taxon
+        for labels in rank_labels
     ]
     print(f"  {num_ranks} ranks, "
           + ", ".join(f"rank{r}: {len(train_id_to_taxon[r])} taxa"

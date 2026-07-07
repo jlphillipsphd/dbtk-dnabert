@@ -205,22 +205,52 @@ class DnaBertForPretraining(DbtkModel):
     def save_pretrained(self, *args, **kwargs):
         return self.base.save_pretrained(*args, **kwargs)
 
-def _load_taxonomy_from_lmdb(path: Path) -> Tuple[List[List[str]], List[List[int]]]:
+def _load_taxonomy_from_lmdb(
+    path: Path,
+) -> Tuple[List[List[str]], List[List[List[int]]], List[List[int]]]:
     from dnadb import taxonomy as tax_module
-    rank_labels: List[List[str]] = []
-    parent_indices: List[List[int]] = []
     with tax_module.TaxonomyDb(str(path)) as tax_db:
         tree = tax_db.tree
-    for rank, taxons in enumerate(tree.taxonomy_id_map):
-        rank_labels.append([t.taxon_label.strip() for t in taxons])
-        if rank == 0:
-            parent_indices.append([])
-        else:
-            parent_indices.append([t.parent.taxonomy_id for t in taxons])
-    return rank_labels, parent_indices
+
+    num_ranks = tree.depth
+    # rank_labels from id_to_taxon_map: unique, alphabetically sorted at every rank
+    rank_labels: List[List[str]] = [list(labels) for labels in tree.id_to_taxon_map]
+    num_leaf_taxa = len(rank_labels[-1])
+
+    # Collect full paths in alphabetical taxon_id space from each DFS leaf node.
+    # Each DFS leaf carries taxon_id (alpha index) and taxon_ids (root→leaf alpha tuple).
+    # Shared-name genera yield multiple distinct paths for the same taxon_id.
+    leaf_paths_all: List[List[Tuple]] = [[] for _ in range(num_leaf_taxa)]
+    for leaf in tree.taxonomy_id_map[-1]:
+        path_tuple = leaf.taxon_ids  # (domain_alpha, phylum_alpha, ..., genus_alpha)
+        if path_tuple not in leaf_paths_all[leaf.taxon_id]:
+            leaf_paths_all[leaf.taxon_id].append(path_tuple)
+
+    # Canonical path per genus: lexicographically smallest (deterministic).
+    leaf_paths: List[List[int]] = [list(sorted(paths)[0]) for paths in leaf_paths_all]
+
+    # parent_indices[r][child_alpha_id] = sorted list of parent alpha IDs.
+    # Derived from all leaf paths so multi-parent shared-name taxa are fully captured.
+    parent_indices: List[List[List[int]]] = [
+        [[] for _ in range(len(rank_labels[r]))] for r in range(num_ranks)
+    ]
+    for paths in leaf_paths_all:
+        for path_tuple in paths:
+            for r in range(1, num_ranks):
+                child_id = path_tuple[r]
+                parent_id = path_tuple[r - 1]
+                if parent_id not in parent_indices[r][child_id]:
+                    parent_indices[r][child_id].append(parent_id)
+    for r in range(num_ranks):
+        for i in range(len(parent_indices[r])):
+            parent_indices[r][i].sort()
+
+    return rank_labels, parent_indices, leaf_paths
 
 
-def _load_taxonomy_from_greengenes(path: Path) -> Tuple[List[List[str]], List[List[int]]]:
+def _load_taxonomy_from_greengenes(
+    path: Path,
+) -> Tuple[List[List[str]], List[List[List[int]]], List[List[int]]]:
     from dnadb import taxonomy as tax_module
     all_labels = sorted(set(e.label for e in tax_module.entries(str(path))))
     parsed = [label.split("; ") for label in all_labels]
@@ -234,28 +264,39 @@ def _load_taxonomy_from_greengenes(path: Path) -> Tuple[List[List[str]], List[Li
                 prefix_to_idx[rank][prefix] = len(prefix_to_idx[rank])
 
     rank_labels: List[List[str]] = []
-    parent_indices: List[List[int]] = []
+    parent_indices: List[List[List[int]]] = []
     for rank in range(num_ranks):
         by_idx = sorted(prefix_to_idx[rank].items(), key=lambda kv: kv[1])
         rank_labels.append([label for label, _ in by_idx])
         if rank == 0:
-            parent_indices.append([])
+            parent_indices.append([[] for _ in range(len(by_idx))])
         else:
-            pindices = []
+            pindices: List[List[int]] = []
             for label, _ in by_idx:
                 parent_prefix = "; ".join(label.split("; ")[:-1])
-                pindices.append(prefix_to_idx[rank - 1][parent_prefix])
+                pindices.append([prefix_to_idx[rank - 1][parent_prefix]])
             parent_indices.append(pindices)
 
-    return rank_labels, parent_indices
+    # Full path per unique leaf lineage (Greengenes has no shared names).
+    leaf_paths: List[List[int]] = [
+        [prefix_to_idx[r]["; ".join(parts[:r + 1])] for r in range(num_ranks)]
+        for parts in parsed
+    ]
+
+    return rank_labels, parent_indices, leaf_paths
 
 
 @export
-def load_taxonomy(path: Union[str, Path]) -> Tuple[List[List[str]], List[List[int]]]:
-    """Load rank_labels and parent_indices from a taxonomy file.
+def load_taxonomy(
+    path: Union[str, Path],
+) -> Tuple[List[List[str]], List[List[List[int]]], List[List[int]]]:
+    """Load rank_labels, parent_indices, and leaf_paths from a taxonomy file.
 
     .txt → Greengenes flat-file format; otherwise → LMDB TaxonomyDb.
-    Returns (rank_labels, parent_indices).
+    Returns (rank_labels, parent_indices, leaf_paths).
+      rank_labels[r]       — sorted unique taxon labels at rank r
+      parent_indices[r][i] — sorted list of parent alpha IDs for child i at rank r
+      leaf_paths[i]        — [domain_alpha, ..., genus_alpha] for leaf genus i
     """
     path = Path(path)
     if path.suffix == ".txt":
@@ -271,7 +312,8 @@ class TaxonomyHead(nn.Module):
         self,
         embed_dim: int,
         rank_labels: List[List[str]],
-        parent_indices: List[List[int]]
+        parent_indices: List[List[List[int]]],
+        leaf_paths: List[List[int]],
     ):
         super().__init__()
         if not rank_labels:
@@ -289,28 +331,50 @@ class TopDownTaxonomyHead(TaxonomyHead):
         self,
         embed_dim: int,
         rank_labels: List[List[str]],
-        parent_indices: List[List[int]]
+        parent_indices: List[List[List[int]]],
+        leaf_paths: List[List[int]],
     ):
-        super().__init__(embed_dim, rank_labels, parent_indices)
+        super().__init__(embed_dim, rank_labels, parent_indices, leaf_paths)
         self.projections = nn.ModuleList([
             nn.Linear(embed_dim, len(labels))
             for labels in rank_labels
         ])
-        for rank, indices in enumerate(parent_indices):
-            if indices:
-                self.register_buffer(
-                    f"parent_idx_{rank}",
-                    torch.tensor(indices, dtype=torch.long)
-                )
+        # Build (child, parent) edge index buffers per rank from parent_indices.
+        # parent_indices[r][i] is a sorted list of parent alpha IDs for child i.
+        # Unique-parent taxa produce one edge; shared-name taxa produce multiple.
+        for rank, edges in enumerate(parent_indices):
+            if not edges:
+                continue
+            child_ids, parent_ids = [], []
+            for child_id, parents in enumerate(edges):
+                for parent_id in parents:
+                    child_ids.append(child_id)
+                    parent_ids.append(parent_id)
+            if child_ids:
+                self.register_buffer(f"edge_child_{rank}", torch.tensor(child_ids, dtype=torch.long))
+                self.register_buffer(f"edge_parent_{rank}", torch.tensor(parent_ids, dtype=torch.long))
 
     def forward(self, embedding: torch.Tensor) -> List[torch.Tensor]:
         logits_list = []
         prev_logits = None
         for rank, projection in enumerate(self.projections):
             logits = projection(embedding)
-            if rank > 0:
-                parent_idx = getattr(self, f"parent_idx_{rank}")
-                logits = logits + prev_logits[:, parent_idx]
+            if rank > 0 and hasattr(self, f"edge_child_{rank}"):
+                edge_child = getattr(self, f"edge_child_{rank}")   # [E]
+                edge_parent = getattr(self, f"edge_parent_{rank}")  # [E]
+                B = embedding.shape[0]
+                # Gather parent logits for every edge: [B, E]
+                parent_scores = prev_logits.index_select(1, edge_parent)
+                # Scatter-max onto children: for each child take max over its parent edges.
+                child_bias = parent_scores.new_full((B, logits.shape[-1]), float('-inf'))
+                child_bias.scatter_reduce_(
+                    1,
+                    edge_child.unsqueeze(0).expand(B, -1),
+                    parent_scores,
+                    reduce='amax',
+                    include_self=True,
+                )
+                logits = logits + child_bias
             logits_list.append(logits)
             prev_logits = logits
         return logits_list
@@ -327,7 +391,8 @@ class DnaBertForTaxonomy(DbtkModel):
             base: Optional[BaseModelType["DnaBert"]] = None,
             base_class: Optional[BaseModelClassType["DnaBert"]] = "dnabert.models.DnaBert",
             rank_labels: Optional[List[List[str]]] = None,
-            parent_indices: Optional[List[List[int]]] = None,
+            parent_indices: Optional[List[List[List[int]]]] = None,
+            leaf_paths: Optional[List[List[int]]] = None,
             taxonomy_db_path: Optional[str] = None,
             head_type: str = "topdown",
             **kwargs
@@ -337,6 +402,7 @@ class DnaBertForTaxonomy(DbtkModel):
             self.base_class = base_class
             self.rank_labels = rank_labels or []
             self.parent_indices = parent_indices or []
+            self.leaf_paths = leaf_paths or []
             self.taxonomy_db_path = taxonomy_db_path
             self.head_type = head_type
 
@@ -348,9 +414,10 @@ class DnaBertForTaxonomy(DbtkModel):
     def __init__(self, config: Optional[Union[Config, dict]] = None):
         super().__init__(config)
         if not self.config.rank_labels and self.config.taxonomy_db_path:
-            rank_labels, parent_indices = load_taxonomy(self.config.taxonomy_db_path)
+            rank_labels, parent_indices, leaf_paths = load_taxonomy(self.config.taxonomy_db_path)
             self.config.rank_labels = rank_labels
             self.config.parent_indices = parent_indices
+            self.config.leaf_paths = leaf_paths
         head_types = {
             "topdown": TopDownTaxonomyHead,
             "naive": NaiveTaxonomyHead,
@@ -363,7 +430,8 @@ class DnaBertForTaxonomy(DbtkModel):
         self.taxonomy_head = head_types[self.config.head_type](
             self.base.config.embed_dim,
             self.config.rank_labels,
-            self.config.parent_indices
+            self.config.parent_indices,
+            self.config.leaf_paths,
         )
 
     @property
@@ -392,9 +460,14 @@ class DnaBertForTaxonomy(DbtkModel):
             self.log(f"{mode}/loss", loss, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
             with torch.no_grad():
                 predicted_leaves = output.argmax(dim=-1)
+                # A correctly predicted genus unambiguously determines the organism,
+                # so credit all coarser ranks when the leaf is correct — even for
+                # shared-name genera whose canonical ancestor path may differ from
+                # the true path for some training examples.
+                correct_leaf = (predicted_leaves == taxonomies[-1])
                 for rank in range(self.num_ranks):
                     pred_at_rank = self.taxonomy_head.ancestor_at_rank(predicted_leaves, rank)
-                    acc = (pred_at_rank == taxonomies[rank]).float().mean()
+                    acc = (correct_leaf | (pred_at_rank == taxonomies[rank])).float().mean()
                     self.log(f"{mode}/rank{rank}_acc", acc, prog_bar=False, on_step=False, on_epoch=True, sync_dist=True)
         return loss
 
@@ -476,19 +549,18 @@ class NaiveTaxonomyHead(TaxonomyHead):
         self,
         embed_dim: int,
         rank_labels: List[List[str]],
-        parent_indices: List[List[int]]
+        parent_indices: List[List[List[int]]],
+        leaf_paths: List[List[int]],
     ):
-        super().__init__(embed_dim, rank_labels, parent_indices)
+        super().__init__(embed_dim, rank_labels, parent_indices, leaf_paths)
         num_leaf_taxa = len(rank_labels[-1])
         self.projection = nn.Linear(embed_dim, num_leaf_taxa)
 
-        # Build leaf→ancestor index buffers for per-rank accuracy
-        num_ranks = len(rank_labels)
-        ancestors = list(range(num_leaf_taxa))
-        self.register_buffer(f"leaf_ancestors_{num_ranks - 1}", torch.tensor(ancestors, dtype=torch.long))
-        for rank in range(num_ranks - 2, -1, -1):
-            ancestors = [parent_indices[rank + 1][a] for a in ancestors]
-            self.register_buffer(f"leaf_ancestors_{rank}", torch.tensor(ancestors, dtype=torch.long))
+        # leaf_paths[i][r] = alpha taxon_id at rank r for leaf genus i.
+        # Register one buffer per rank so ancestor_at_rank is a direct lookup.
+        paths_tensor = torch.tensor(leaf_paths, dtype=torch.long)  # [num_leaf_taxa, num_ranks]
+        for rank in range(len(rank_labels)):
+            self.register_buffer(f"leaf_ancestors_{rank}", paths_tensor[:, rank].clone())
 
     def forward(self, embedding: torch.Tensor) -> torch.Tensor:
         return self.projection(embedding)
@@ -503,9 +575,10 @@ class BertaxTaxonomyHead(TaxonomyHead):
         self,
         embed_dim: int,
         rank_labels: List[List[str]],
-        parent_indices: List[List[int]]  # accepted for API consistency, unused
+        parent_indices: List[List[List[int]]],
+        leaf_paths: List[List[int]],  # accepted for API consistency, unused
     ):
-        super().__init__(embed_dim, rank_labels, parent_indices)
+        super().__init__(embed_dim, rank_labels, parent_indices, leaf_paths)
         taxon_counts = [len(labels) for labels in rank_labels]
         self.projections = nn.ModuleList()
         cumulative = 0

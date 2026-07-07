@@ -43,7 +43,7 @@ from dnadb import taxonomy
 
 def build_ancestor_map(
     rank_labels: List[List[str]],
-    parent_indices: List[List[int]],
+    parent_indices: List[List[List[int]]],
     train_id_to_taxon: List[List[str]],
 ) -> List[Optional[Dict[int, List[int]]]]:
     """
@@ -53,27 +53,17 @@ def build_ancestor_map(
     parent_map[0] = None (domain has no parent).
     The list has more than one entry only when the same label appears under
     multiple parents (shared taxon name within a rank).
-    """
-    taxon_to_id = [
-        {label: i for i, label in enumerate(labels)}
-        for labels in train_id_to_taxon
-    ]
 
+    parent_indices[r][i] is a list of parent alpha IDs for child alpha ID i.
+    rank_labels and train_id_to_taxon are both alphabetically ordered, so
+    child alpha ID i corresponds directly to rank_labels[r][i].
+    """
     parent_map: List[Optional[Dict[int, List[int]]]] = [None]
     for r in range(1, len(rank_labels)):
         mapping: Dict[int, List[int]] = {}
-        for taxonomy_id_i, label in enumerate(rank_labels[r]):
-            taxon_id = taxon_to_id[r].get(label)
-            if taxon_id is None:
-                continue
-            parent_taxonomy_id = parent_indices[r][taxonomy_id_i]
-            parent_label = rank_labels[r - 1][parent_taxonomy_id]
-            parent_taxon_id = taxon_to_id[r - 1].get(parent_label)
-            if parent_taxon_id is None:
-                continue
-            candidates = mapping.setdefault(taxon_id, [])
-            if parent_taxon_id not in candidates:
-                candidates.append(parent_taxon_id)
+        for child_id, parents in enumerate(parent_indices[r]):
+            if parents:
+                mapping[child_id] = list(parents)
         parent_map.append(mapping)
     return parent_map
 
