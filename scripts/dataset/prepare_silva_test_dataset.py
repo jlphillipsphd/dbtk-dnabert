@@ -15,7 +15,7 @@ Usage:
         --reference-tax-db $DATASETS_DIR/silva_nr99_filtered_515f_806r/taxonomy.tax.db \\
         --sequences-path   $DATA_DIR/silva/138.2/silva-138.2-seqs-515f-806r-derep.fasta \\
         --taxonomy-path    $DATA_DIR/silva/138.2/silva-138.2-tax-515f-806r-derep.tsv \\
-        --output-path      $DATASETS_DIR/silva_nr99_filtered_515f_806r \\
+        --output-path      $DATASETS_DIR/silva_nr99_filtered_515f_806r_test \\
         --min-length       150
 """
 
@@ -63,7 +63,7 @@ def main():
     )
     parser.add_argument(
         "--output-path", type=Path, required=True,
-        help="Directory to write sequences.test.fasta.db and taxonomy.test.tax.db",
+        help="Output directory (e.g. silva_nr99_filtered_515f_806r_test); writes sequences.fasta.db and taxonomy.tax.db",
     )
     parser.add_argument(
         "--min-length", type=int, default=150,
@@ -72,8 +72,8 @@ def main():
     args = parser.parse_args()
 
     args.output_path.mkdir(parents=True, exist_ok=True)
-    fasta_out = args.output_path / "sequences.test.fasta.db"
-    tax_out   = args.output_path / "taxonomy.test.tax.db"
+    fasta_out = args.output_path / "sequences.fasta.db"
+    tax_out   = args.output_path / "taxonomy.tax.db"
 
     print(f"Reference taxonomy DB : {args.reference_tax_db}")
     print(f"Source sequences      : {args.sequences_path}")

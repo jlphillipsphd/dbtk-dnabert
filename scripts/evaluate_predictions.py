@@ -19,9 +19,9 @@ Usage:
 
 Example:
     python evaluate_predictions.py predictions.pt \\
-        $DATASETS_DIR/silva_nr99_filtered_515f_806r/taxonomy.test.tax.db \\
+        $DATASETS_DIR/silva_nr99_filtered_515f_806r_test/taxonomy.tax.db \\
         --anchor-rank 5
-    python evaluate_predictions.py predictions.pt taxonomy.test.tax.db \\
+    python evaluate_predictions.py predictions.pt taxonomy.tax.db \\
         --top-k 1 --output results.tsv
 """
 

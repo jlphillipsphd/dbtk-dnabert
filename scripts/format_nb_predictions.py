@@ -17,9 +17,9 @@ Usage:
 Example:
     python scripts/format_nb_predictions.py \\
         --predictions  $DATA_DIR/qiime/nb_predict_work/taxonomy.tsv \\
-        --sequences-db $DATASETS_DIR/silva_nr99_filtered_515f_806r/sequences.test.fasta.db \\
+        --sequences-db $DATASETS_DIR/silva_nr99_filtered_515f_806r_test/sequences.fasta.db \\
         --taxonomy-db  $DATASETS_DIR/silva_nr99_filtered_515f_806r/taxonomy.tax.db \\
-        --output       $DATASETS_DIR/silva_nr99_filtered_515f_806r/predictions_nb.pt \\
+        --output       $DATASETS_DIR/silva_nr99_filtered_515f_806r_test/predictions_nb_qiime.pt \\
         --overwrite
 """
 

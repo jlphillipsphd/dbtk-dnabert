@@ -24,9 +24,9 @@
 # Example:
 #   bash scripts/predict_naive_bayes.sh \
 #       --classifier-qza $DATA_DIR/qiime/silva-138.2-99-515f-806r-nb-classifier.qza \
-#       --sequences-db   $DATASETS_DIR/silva_nr99_filtered_515f_806r/sequences.test.fasta.db \
+#       --sequences-db   $DATASETS_DIR/silva_nr99_filtered_515f_806r_test/sequences.fasta.db \
 #       --taxonomy-db    $DATASETS_DIR/silva_nr99_filtered_515f_806r/taxonomy.tax.db \
-#       --output         $DATASETS_DIR/silva_nr99_filtered_515f_806r/predictions_nb.pt \
+#       --output         $DATASETS_DIR/silva_nr99_filtered_515f_806r_test/predictions_nb_qiime.pt \
 #       --num-jobs       32 \
 #       --work-dir       $DATA_DIR/qiime/nb_predict_work \
 #       --keep-work-dir

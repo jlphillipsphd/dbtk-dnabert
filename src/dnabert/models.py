@@ -516,6 +516,16 @@ class DnaBertForTaxonomy(DbtkModel):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-4)
 
+    def create_datamodule(self, sequences_path, batch_size: int = 256, num_workers: int = 0):
+        from .datamodules import DnaBertSequencePredictDataModule
+        return DnaBertSequencePredictDataModule(
+            tokenizer=self.tokenizer,
+            sequences_path=sequences_path,
+            max_length=self.base.config.max_length,
+            batch_size=batch_size,
+            num_workers=num_workers,
+        )
+
     def setup(self, stage: str):
         if not self.config.rank_labels:
             return

@@ -198,6 +198,60 @@ class DnaBertTaxonomyDataModule(L.LightningDataModule):
         )
 
 
+class RawSequencePredictDataset(torch.utils.data.Dataset):
+    """Dataset that yields (seq_id, raw_sequence_string) without tokenization."""
+
+    def __init__(self, fasta_db: fasta.FastaDb):
+        self.fasta_db = fasta_db
+        self._ids = [entry.identifier for entry in fasta_db]
+
+    def __len__(self):
+        return len(self._ids)
+
+    def __getitem__(self, idx):
+        seq_id = self._ids[idx]
+        return seq_id, self.fasta_db[seq_id].sequence
+
+
+class RawSequencePredictDataModule(L.LightningDataModule):
+    """Predict-only datamodule that yields (seq_ids, List[str]) batches.
+
+    Used by NaiveBayesForTaxonomy, which needs raw sequences for
+    HashingVectorizer rather than k-mer token IDs.
+    """
+
+    def __init__(
+        self,
+        sequences_path: Union[str, Path],
+        batch_size: int = 4096,
+        num_workers: int = 0,
+    ):
+        super().__init__()
+        self.sequences_path = sequences_path
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+
+    def setup(self, stage: str):
+        if stage == "predict":
+            self.dataset = RawSequencePredictDataset(fasta.FastaDb(self.sequences_path))
+
+    def teardown(self, stage: str):
+        if stage == "predict" and hasattr(self, "dataset"):
+            self.dataset.fasta_db.close()
+
+    def predict_dataloader(self):
+        return torch.utils.data.DataLoader(
+            self.dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            collate_fn=lambda batch: (
+                [item[0] for item in batch],
+                [item[1] for item in batch],
+            ),
+            num_workers=self.num_workers,
+        )
+
+
 class DnaBertSequencePredictDataset(torch.utils.data.Dataset):
     """Dataset for deterministic prediction from sequences alone: returns (seq_id, tokens)."""
 
