@@ -13,3 +13,5 @@ model:
       activation: gelu
     min_mask_ratio: 0.15
     max_mask_ratio: 0.15
+    lr: 1.0e-4
+    warmup_ratio: 0.05

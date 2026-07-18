@@ -254,12 +254,12 @@ function create_dnadb_dataset() {
             "${out}/taxonomy.tax.db"
 
     if [ -n "${test_fasta_path}" ]; then
-        step "${out}/sequences.test.fasta.db" "Creating test dataset" \
+        step "${out}_test/sequences.fasta.db" "Creating test dataset" \
             python3 "${SCRIPT_DIR}/prepare_silva_test_dataset.py" \
                 --reference-tax-db "${out}/taxonomy.tax.db" \
                 --sequences-path   "${test_fasta_path}" \
                 --taxonomy-path    "${test_tax_path}" \
-                --output-path      "${out}" \
+                --output-path      "${out}_test" \
                 --min-length       "${MIN_SEQUENCE_LENGTH}"
     fi
 }

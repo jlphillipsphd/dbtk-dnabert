@@ -124,6 +124,8 @@ class DnaBertForPretraining(DbtkModel):
             base_class: Optional[BaseModelClassType[DnaBert]] = "dnabert.models.DnaBert",
             min_mask_ratio: float = 0.15,
             max_mask_ratio: float = 0.15,
+            lr: float = 1e-4,
+            warmup_ratio: float = 0.05,
             **kwargs
         ):
             super().__init__(**kwargs)
@@ -131,6 +133,8 @@ class DnaBertForPretraining(DbtkModel):
             self.base_class = base_class
             self.min_mask_ratio = min_mask_ratio
             self.max_mask_ratio = max_mask_ratio
+            self.lr = lr
+            self.warmup_ratio = warmup_ratio
 
     config_class = Config
     base_model_prefix = "base"
@@ -191,8 +195,19 @@ class DnaBertForPretraining(DbtkModel):
         return self._step("test", batch)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
-        return optimizer
+        from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.config.lr)
+        total_steps = self.trainer.estimated_stepping_batches
+        warmup_steps = max(1, int(self.config.warmup_ratio * total_steps))
+        scheduler = SequentialLR(
+            optimizer,
+            schedulers=[
+                LinearLR(optimizer, start_factor=1e-6, end_factor=1.0, total_iters=warmup_steps),
+                CosineAnnealingLR(optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=0),
+            ],
+            milestones=[warmup_steps],
+        )
+        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "step"}}
 
     def to_embedding_model(self) -> "DnaBertForEmbedding":
         """Return a DnaBertForEmbedding carrying this model's encoder weights."""
@@ -395,6 +410,8 @@ class DnaBertForTaxonomy(DbtkModel):
             leaf_paths: Optional[List[List[int]]] = None,
             taxonomy_db_path: Optional[str] = None,
             head_type: str = "topdown",
+            lr: float = 1e-4,
+            warmup_ratio: float = 0.05,
             **kwargs
         ):
             super().__init__(**kwargs)
@@ -405,6 +422,8 @@ class DnaBertForTaxonomy(DbtkModel):
             self.leaf_paths = leaf_paths or []
             self.taxonomy_db_path = taxonomy_db_path
             self.head_type = head_type
+            self.lr = lr
+            self.warmup_ratio = warmup_ratio
 
     config_class = Config
     base_model_prefix = "base"
@@ -514,7 +533,19 @@ class DnaBertForTaxonomy(DbtkModel):
         return seq_ids, pred_ids.cpu(), topk_ids.cpu(), topk_scores.cpu()
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=1e-4)
+        from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.config.lr)
+        total_steps = self.trainer.estimated_stepping_batches
+        warmup_steps = max(1, int(self.config.warmup_ratio * total_steps))
+        scheduler = SequentialLR(
+            optimizer,
+            schedulers=[
+                LinearLR(optimizer, start_factor=1e-6, end_factor=1.0, total_iters=warmup_steps),
+                CosineAnnealingLR(optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=0),
+            ],
+            milestones=[warmup_steps],
+        )
+        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "step"}}
 
     def create_datamodule(self, sequences_path, batch_size: int = 256, num_workers: int = 0):
         from .datamodules import DnaBertSequencePredictDataModule
