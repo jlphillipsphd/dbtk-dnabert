@@ -207,7 +207,8 @@ function run_qiime2_pipeline() {
                 --p-max-length      0 \
                 --p-n-jobs          "${NUM_JOBS}" \
                 --p-read-orientation both \
-                --o-reads           "${t}-seqs-515f-806r.qza"
+                --o-reads           "${t}-seqs-515f-806r.qza" \
+                --o-read-extraction-stats	"${t}-seqs-515f-806r-stats.qza"
 
         # Dereplicate amplicons
         also_remove "${t}-tax-515f-806r-derep.qza"
