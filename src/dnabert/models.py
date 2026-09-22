@@ -43,6 +43,7 @@ class DnaBert(DbtkModel):
             feedforward_dim: int = 2048,
             activation: str = "gelu",
             max_length: int = 250,
+            head_embed_dim: Optional[int] = None,
             **kwargs
         ):
             super().__init__(**kwargs)
@@ -55,6 +56,7 @@ class DnaBert(DbtkModel):
             self.feedforward_dim = feedforward_dim
             self.activation = activation
             self.max_length = max_length
+            self.head_embed_dim = head_embed_dim
 
     config_class = Config
 
@@ -77,7 +79,8 @@ class DnaBert(DbtkModel):
                 mha=layers.RelativeMultiHeadAttention(
                     embed_dim=self.config.embed_dim,
                     num_heads=self.config.num_heads,
-                    max_length=self.config.max_length
+                    max_length=self.config.max_length,
+                    head_embed_dim=self.config.head_embed_dim,
                 ),
                 feedforward_dim=self.config.feedforward_dim,
                 feedforward_activation=activation
